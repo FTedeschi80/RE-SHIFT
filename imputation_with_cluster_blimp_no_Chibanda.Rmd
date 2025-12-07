@@ -1,0 +1,437 @@
+---
+title: "Analysis_per_trialname_normal_FT"
+author: "Federico Tedeschi"
+date: "2025-06-25"
+output: word_document
+---
+  RE_SHIFT_2025aprile13
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r setup, include=FALSE}
+rm(list=ls())
+
+
+### load data
+
+setwd("C:\\Users\\tdsfrc40\\OneDrive - Università degli Studi di Verona\\Z\\Federico_main\\Lavori_Vr\\ongoing\\lavori_gruppo_CB\\NMA\\IPD_NMA_RESHIFT")
+load(file="full_dataset_componenti_binari_23_07_25_daimputare.RData")
+dataset<-full_dataset_componenti_binari_23_07_25_daimputare
+# Dividi il dataset in una lista, dove ogni elemento è uno studio
+study_list <- list()
+study_list <- split(dataset, dataset$trialname)
+library(tidyr)
+library(dplyr)
+
+
+dataset %>%
+  distinct(arm_name, across(TAU:IF)) %>%  # Seleziona solo colonne rilevanti
+  arrange(arm_name)  # Ordina per nome del braccio (opzionale)
+```
+
+```{r list, include=FALSE}
+library(jomo)
+# Installare e caricare il pacchetto dummies
+library(fastDummies)
+# Creare variabili dummy per la variabile arm
+library(dplyr)
+library(tidyr)
+#full_dataset<-full_dataset_componenti_binari_23_07_25_da_imputare
+# List
+studies <- c("Acarturk 2022", "Chibanda 2016", "Chowdhary 2016", "Cuijpers 2022a", "Cuijpers 2022b", "Jordans 2019", "Jordans 2021", "Khan 2019", "Markkula 2019", "Matsuzaka 2017","Murphy 2020", "Nakimuli-Mpungu 20 20", "Patel 2017", "Purgato 2021", "Rahman 2016", "Rahman 2019", "Sangraula 2020", "Tol 2020",  "Z_Acarturk 2024", "Z_Acaturk 2022b", "Z_Akhtar 2021 (71)","Z_Bryant 2022 (72)", "Z_Burchert 2024", "Z_DeGraaff 2020 (11)", "Z_DeGraaff 2023 (12)", "Z_Spaaji 2022 (21)", "Z_UNPUBLISHED_CH_main (22)", "Z_UNPUBLISHED_GE_main (42)", "Z_UNPUBLISHED_GE_pilot (41)", "Z_UNPUBLISHED_SW_main (62)")
+
+# Load each study in the list
+for (study in studies) {
+  study_list[[study]] <- get(study) # get() recovers the object
+}
+
+# Identifichiamo tutte le colonne uniche
+unique_columns <- unique(unlist(lapply(study_list, names)))
+
+# Aggiungiamo le colonne mancanti a ciascun dataset
+full_study_list <- lapply(study_list, function(df) {
+  missing_columns <- setdiff(unique_columns, names(df))
+  if (length(missing_columns) > 0) {
+    df[missing_columns] <- NA
+  }
+return(df)
+})
+
+
+# Let’s join all dataframes in a single dataset
+full_dataset<- do.call(rbind, full_study_list)
+#full_dataset <- dummy_cols(full_dataset, select_columns = "arm", remove_first_dummy = FALSE)
+full_dataset <- full_dataset %>% mutate(age = if_else(trialname == "Rahman 2019" & age==3, NA, age))
+# Let’s visualize the first lines
+head(full_dataset)
+library(dplyr)
+
+# Metodo 1: Filtra per mantenere tutto tranne "Chibanda 2016"6
+  
+full_dataset <- full_dataset %>% 
+filter(trialname != "Chibanda 2016")
+```
+
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+if (!require("remotes")) install.packages("remotes")
+remotes::install_github("blimp-stats/rblimp")
+library(rblimp)
+```
+
+
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+colnames(full_dataset)
+education<-full_dataset$education 
+marital<-full_dataset$marital
+occupation<-full_dataset$occupation 
+trialname<-full_dataset$trialname 
+cluster<-full_dataset$cluster
+participantId<-full_dataset$participantId
+arm<-full_dataset$arm 
+gender<-full_dataset$gender
+age<-full_dataset$age
+endpoint<-full_dataset$endpoint_CMD_pct
+baseline<-full_dataset$baseline_CMD_pct
+TAU<-full_dataset$TAU
+PE<-full_dataset$PE
+CR<-full_dataset$CR
+ACC<-full_dataset$ACC
+REL<-full_dataset$REL
+PM<-full_dataset$PM 
+BA<-full_dataset$BA
+SSS<-full_dataset$SSS
+IF<-full_dataset$IF
+
+
+# Let's see what is missing
+
+summary(as.numeric(education))
+summary(as.numeric(marital))
+summary(as.numeric(occupation))
+summary(as.numeric(gender))
+summary(as.numeric(age))
+summary(as.numeric(endpoint))
+summary(as.numeric(baseline))
+
+# they all have missing values
+```
+
+```{r transformation, include=FALSE, message=FALSE, warning=FALSE}
+full_dataset$stc_bin <- ifelse(is.na(full_dataset$marital), NA,
+                                ifelse(full_dataset$marital %in% c("1"), "1", "0"))
+
+full_dataset$empl_bin <- ifelse(is.na(full_dataset$occupation), NA,
+                                ifelse(full_dataset$occupation %in% c("1"), "1", "0"))
+full_dataset$edu_bin <- ifelse(full_dataset$education %in% c("0", "1"), "0", "1")
+full_dataset$age <- as.numeric(full_dataset$age)
+full_dataset$baseline <- as.numeric(full_dataset$baseline_CMD_pct)
+```
+
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+baseline_mean<-mean(as.numeric(baseline), na.rm=T)
+sprintf("%.16f", baseline_mean)
+baseline_sd<-sd(as.numeric(baseline), na.rm=T)
+sprintf("%.16f", baseline_sd)
+```
+
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+# Prepara i dati (converti fattori e assicurati che i cluster siano univoci)
+full_dataset$cluster[is.na(full_dataset$cluster)]<- 1
+full_dataset <- full_dataset %>%
+  mutate(
+    across(c(gender, edu_bin, stc_bin, empl_bin), as.factor),
+    cluster_unique = as.numeric(interaction(trialname, cluster))  # Cluster univoci
+  )
+
+full_dataset$y<- full_dataset$endpoint_CMD_pct
+#full_dataset$cluster<- full_dataset$cluster_unique
+full_dataset$particId<- full_dataset$participantId
+#age_scaled<-full_dataset$age_scaled
+#baseline_scaled<-full_dataset$baseline_scaled
+#drop <- c("baseline_CMD_pctg","endpoint_CMD_standardizzato")
+#full_dataset = full_dataset[,!(names(full_dataset) %in% drop)]
+
+desired_order <- c("particId", "age", "baseline",
+                   "y", "TAU", "PE", "CR", "ACC", "REL", "PM", "BA", "SSS", "IF", "gender", "edu_bin", "stc_bin", "empl_bin", "trialname", "cluster_unique")
+
+
+
+full_dataset_per_imp <- full_dataset %>% 
+  select(all_of(desired_order))
+
+full_dataset_per_imp$trialnum<-as.numeric(as.factor(full_dataset_per_imp$trialname))
+full_dataset_per_imp<-full_dataset_per_imp %>%
+select(-trialname)
+full_dataset_per_imp$particId<-as.numeric(as.factor(full_dataset_per_imp$particId))
+full_dataset_per_imp$edu_bin<-as.factor(full_dataset_per_imp$edu_bin)
+names(full_dataset_per_imp)
+
+#full_dataset_per_imp <- full_dataset_per_imp %>%
+ # group_by(trialname) %>% # Raggruppa i dati per trialname
+  #mutate(cluster_unique_reindexed = dense_rank(cluster_unique)) %>% # Crea un nuovo ID numerico che riparte da 1 per ogni gruppo
+  #ungroup() # Rimuovi il raggruppamento
+
+# Seleziona e riordina le colonne
+#full_dataset_per_imp <- full_dataset[, desired_order]
+#full_dataset_per_imp$participantId<-as.numeric(full_dataset_per_imp$participantId)
+#write.csv(full_dataset_per_imp, "full_dataset_per_imp.csv", row.names = FALSE, na = "NA", quote = FALSE)
+write.table(full_dataset_per_imp, "full_dataset_per_imp_no_Chibanda.csv", sep = "," , dec = ".", row.names = FALSE, col.names = FALSE, na = "NA", quote = FALSE)
+```
+
+```{r model, include=FALSE, message=FALSE, warning=FALSE}
+model <- "
+DATA: full_dataset_per_imp_no_Chibanda.csv;
+
+VARIABLES: 
+  particId age baseline y
+  TAU PE CR ACC REL PM BA SSS IF
+  gender edu_bin stc_bin empl_bin
+ cluster_unique trialnum;
+
+CLUSTERID: trialnum cluster_unique;
+
+NOMINAL: gender empl_bin stc_bin  edu_bin PE CR ACC REL PM BA SSS IF;
+MISSING: NA;
+
+MODEL:
+  # -------------------------
+  # OUTCOME (modello finale)
+  # -------------------------
+  y ~ baseline age gender empl_bin stc_bin edu_bin 
+       PE CR ACC REL PM BA SSS IF
+       baseline*PE age*PE gender*PE edu_bin*PE empl_bin*PE stc_bin*PE
+       baseline*CR age*CR gender*CR empl_bin*CR stc_bin*CR edu_bin*CR
+       baseline*ACC age*ACC gender*ACC empl_bin*ACC stc_bin*ACC edu_bin*ACC
+       baseline*REL age*REL gender*REL empl_bin*REL stc_bin*REL edu_bin*REL
+       baseline*PM  age*PM  gender*PM  empl_bin*PM  stc_bin*PM  edu_bin*PM
+       baseline*BA  age*BA  gender*BA  empl_bin*BA  stc_bin*BA  edu_bin*BA
+       baseline*SSS age*SSS gender*SSS empl_bin*SSS stc_bin*SSS edu_bin*SSS
+       baseline*IF  age*IF  gender*IF  empl_bin*IF  stc_bin*IF  edu_bin*IF
+       | 1[trialnum] 1[cluster_unique] ;
+
+  # -------------------------
+  # IMPUTAZIONE PREDITTORI CON MISSING
+  # -------------------------
+
+  age ~ baseline gender edu_bin empl_bin stc_bin
+        PE CR ACC REL PM BA SSS IF
+        baseline*PE gender*PE edu_bin*PE empl_bin*PE stc_bin*PE
+        baseline*CR gender*CR edu_bin*CR empl_bin*CR stc_bin*CR
+        baseline*ACC gender*ACC edu_bin*ACC empl_bin*ACC stc_bin*ACC
+        baseline*REL gender*REL edu_bin*REL empl_bin*REL stc_bin*REL
+        baseline*PM  gender*PM  edu_bin*PM  empl_bin*PM  stc_bin*PM
+        baseline*BA  gender*BA  edu_bin*BA  empl_bin*BA  stc_bin*BA
+        baseline*SSS gender*SSS edu_bin*SSS empl_bin*SSS stc_bin*SSS
+        baseline*IF  gender*IF  edu_bin*IF  empl_bin*IF  stc_bin*IF
+        y | 1[trialnum] ;
+
+  baseline ~ age gender edu_bin empl_bin stc_bin
+             PE CR ACC REL PM BA SSS IF
+            gender*PE edu_bin*PE empl_bin*PE stc_bin*PE
+             gender*CR edu_bin*CR empl_bin*CR stc_bin*CR
+             gender*ACC edu_bin*ACC empl_bin*ACC stc_bin*ACC
+             gender*REL edu_bin*REL empl_bin*REL stc_bin*REL
+             gender*PM  edu_bin*PM  empl_bin*PM  stc_bin*PM
+             gender*BA  edu_bin*BA  empl_bin*BA  stc_bin*BA
+             gender*SSS edu_bin*SSS empl_bin*SSS stc_bin*SSS
+             gender*IF  edu_bin*IF  empl_bin*IF  stc_bin*IF
+             y | 1[trialnum] 1[cluster_unique] ;
+
+gender ~ age baseline edu_bin empl_bin stc_bin
+             PE CR ACC REL PM BA SSS IF
+            baseline*PE edu_bin*PE empl_bin*PE stc_bin*PE
+             baseline*CR edu_bin*CR empl_bin*CR stc_bin*CR
+             baseline*ACC edu_bin*ACC empl_bin*ACC stc_bin*ACC
+             baseline*REL edu_bin*REL empl_bin*REL stc_bin*REL
+             baseline*PM  edu_bin*PM  empl_bin*PM  stc_bin*PM
+             baseline*BA  edu_bin*BA  empl_bin*BA  stc_bin*BA
+             baseline*SSS edu_bin*SSS empl_bin*SSS stc_bin*SSS
+             baseline*IF  edu_bin*IF  empl_bin*IF  stc_bin*IF
+             y | 1[trialnum] ;
+
+
+  edu_bin ~ age baseline gender empl_bin stc_bin
+            PE CR ACC REL PM BA SSS IF
+            age*PE baseline*PE gender*PE empl_bin*PE stc_bin*PE
+            age*CR baseline*CR gender*CR empl_bin*CR stc_bin*CR
+            age*ACC baseline*ACC gender*ACC empl_bin*ACC stc_bin*ACC
+            age*REL baseline*REL gender*REL empl_bin*REL stc_bin*REL
+            age*PM  baseline*PM  gender*PM  empl_bin*PM  stc_bin*PM
+            age*BA  baseline*BA  gender*BA  empl_bin*BA  stc_bin*BA
+            age*SSS baseline*SSS gender*SSS empl_bin*SSS stc_bin*SSS
+            age*IF  baseline*IF  gender*IF  empl_bin*IF  stc_bin*IF
+            y | 1[trialnum] ;
+
+  empl_bin ~ age baseline gender edu_bin stc_bin
+             PE CR ACC REL PM BA SSS IF
+            age*PE baseline*PE gender*PE edu_bin*PE stc_bin*PE
+             age*CR baseline*CR gender*CR edu_bin*CR stc_bin*CR
+             age*ACC baseline*ACC gender*ACC edu_bin*ACC stc_bin*ACC
+             age*REL baseline*REL gender*REL edu_bin*REL stc_bin*REL
+             age*PM  baseline*PM  gender*PM  edu_bin*PM  stc_bin*PM
+             age*BA  baseline*BA  gender*BA  edu_bin*BA  stc_bin*BA
+             age*SSS baseline*SSS gender*SSS edu_bin*SSS stc_bin*SSS
+             age*IF  baseline*IF  gender*IF  edu_bin*IF  stc_bin*IF
+             y | 1[trialnum] ;
+
+  stc_bin ~ age baseline gender edu_bin empl_bin
+             PE CR ACC REL PM BA SSS IF
+            age*PE baseline*PE gender*PE edu_bin*PE empl_bin*PE
+             age*CR baseline*CR gender*CR edu_bin*CR empl_bin*CR
+             age*ACC baseline*ACC gender*ACC edu_bin*ACC empl_bin*ACC
+             age*REL baseline*REL gender*REL edu_bin*REL empl_bin*REL
+             age*PM  baseline*PM  gender*PM  edu_bin*PM  empl_bin*PM
+             age*BA  baseline*BA  gender*BA  edu_bin*BA  empl_bin*BA
+             age*SSS baseline*SSS gender*SSS edu_bin*SSS empl_bin*SSS
+             age*IF  baseline*IF  gender*IF  edu_bin*IF empl_bin*IF
+             y | 1[trialnum] ;
+
+SEED: 126;
+BURN: 5000;
+ITER: 1000;
+NIMPS: 5;
+
+OPTIONS: labels;
+OUTFILE: imputed_blimp_both_pct_no_Chibanda*.csv;
+"
+
+
+# Salvataggio del modello in un file
+writeLines(model, "blimp_model_both_pct_no_Chibanda.txt")
+```
+
+
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+system("blimp blimp_model_both_pct_no_Chibanda.txt")
+out <- capture.output(system(' "C:/Program Files/blimp/blimp.exe" blimp_model_both_pct_02_09_25.txt', 
+                             intern = TRUE))
+writeLines(out, "blimp_output_no_Chibanda.txt")
+```
+
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+save.image(file="C:\\Users\\tdsfrc40\\OneDrive - Università degli Studi di Verona\\Z\\Federico_main\\Lavori_Vr\\ongoing\\lavori_gruppo_CB\\NMA\\IPD_NMA_RESHIFT\\aggiornamenti_RE_SHIFT\\dataset_imputed_pct_no_Chibanda.RData")
+```
+
+```{r, include=FALSE}
+rm(list=ls())
+setwd("C:\\Users\\tdsfrc40\\OneDrive - Università degli Studi di Verona\\Z\\Federico_main\\Lavori_Vr\\ongoing\\lavori_gruppo_CB\\NMA\\IPD_NMA_RESHIFT\\aggiornamenti_RE_SHIFT")
+load(file="dataset_imputed_pct_no_Chibanda.RData")
+
+library(tidyverse)
+
+
+setwd("C:\\Users\\tdsfrc40\\OneDrive - Università degli Studi di Verona\\Z\\Federico_main\\Lavori_Vr\\ongoing\\lavori_gruppo_CB\\NMA\\IPD_NMA_RESHIFT\\codici_Orestis\\one_stage_IPD_AD_cNMA")
+# 1. Trova tutti i file imputati
+imputed_files <- list.files(pattern = "imputed_blimp_both_pct_no_Chibanda\\d+\\.csv")
+
+# 2. Carica i file aggiungendo una colonna con il numero di imputazione
+imputed_list <- map(imputed_files, function(file) {
+  read_csv(file, col_names = FALSE, show_col_types = FALSE) %>% 
+    mutate(imputation = str_extract(file, "\\d+"))
+})
+
+# 3. Assegna i nomi corretti alle colonne (ADATTALI AL TUO DATASET!)
+col_names <- c("participantId", "age", "baseline", "endpoint", 
+               "TAU", "PE", "CR", "ACC", "REL", "PM", "BA", "SSS", "IF",
+               "gender", "edu_bin", "stc_bin", "empl_bin",
+                "cluster_unique",  "trialnum", "imputation")
+
+
+# 4. Applica i nomi delle colonne a ciascun dataframe
+imputed_list <- map(imputed_list, ~set_names(.x, col_names))
+
+
+# 5. Combina in un unico dataframe
+imputed_data <- bind_rows(imputed_list) %>% 
+  mutate(across(c(gender, edu_bin, stc_bin, empl_bin), as.factor))
+
+# Verifica
+glimpse(imputed_data)
+summary(imputed_data$endpoint)
+# la presenza di valori "out of range" (-56, 139) aumenta la necessità di togliere i valori imputati  
+```
+
+```{r, include=FALSE}
+full_dataset$rows_with_imputed_y <- is.na(full_dataset$endpoint_CMD_pct)
+table(full_dataset$rows_with_imputed_y)
+full_dataset$particId<-as.numeric(as.factor(full_dataset$participantId))
+full_dataset$trialnum<-as.numeric(as.factor(full_dataset$trialname))
+#imputed_data$trialnum<-imputed_data$trialnum+1
+#imputed_data <- imputed_data %>%
+ # mutate(trialnum = ifelse(trialnum == 2, 1, trialnum))
+imputed_data <- imputed_data %>%
+rename(particId=participantId)
+#imputed_data <- imputed_data %>%
+#  rename(trialnum=trialname)
+
+merged_imp <- imputed_data %>%
+  left_join(full_dataset, by = c("trialnum", "particId"))
+
+
+dataset_without_imputed_outcome<- merged_imp %>%
+filter(!rows_with_imputed_y)
+
+# 4. VERIFICHE FINALI
+# -------------------
+cat("Righe nel dataset finale:", nrow(dataset_without_imputed_outcome), "\n")
+cat("Distribuzione delle imputazioni:\n")
+table(dataset_without_imputed_outcome$imputation)
+dataset_without_imputed_outcome$imputation<-as.numeric(as.factor(dataset_without_imputed_outcome$imputation))
+# Estrai il primo valore da ogni lista (se sono tutti uguali)
+dataset_without_imputed_outcome <- dataset_without_imputed_outcome %>%
+  mutate(
+    age_scaled = sapply(age_scaled, function(x) ifelse(is.null(x), NA, x[[1]])),
+    baseline.y = sapply(baseline.y, function(x) ifelse(is.null(x), NA, x[[1]])),
+    y = sapply(y, function(x) ifelse(is.null(x), NA, x[[1]]))
+  )
+# Salva il risultato
+write_csv(dataset_without_imputed_outcome, "dataset_finale_senza_endpoint_imputato_no_Chibanda_06_09_25.csv")
+```
+
+```{r, echo=FALSE}
+merged_imp<-dataset_without_imputed_outcome %>% select(-ends_with(".y"))
+merged_imp<-merged_imp %>%
+  rename_with(~ sub("\\.x$", "", .x), .cols = ends_with(".x"))
+View(merged_imp)
+
+library(openxlsx)
+#library("xlsx")
+#options(java.parameters = "-Xmx4g")  # Alloca 4 GB di memoria a Java
+write.xlsx(merged_imp, file = "C:/Users/tdsfrc40/OneDrive - Università degli Studi di Verona/Z/Federico_main/Lavori_Vr/ongoing/lavori_gruppo_CB/NMA/IPD_NMA_RESHIFT/dataset_finale_senza_endpoint_imputato_no_Chibanda_06_09_25.xlsx",sheetName = "dataset_imp", append = FALSE)
+```
+
+Verify class, name and dimension of imp: it is a
+
+```{r, echo=FALSE}
+class(merged_imp)
+```
+
+with such variables:
+
+```{r, echo=FALSE}
+names(merged_imp)
+```
+
+, corresponding to such dimensions:
+
+```{r, echo=FALSE}
+dim(merged_imp)
+```
+
+These are the original (partially observed) data:
+
+```{r, echo=FALSE}
+head(merged_imp)
+```
+
+This the (partially observed) last imputation:
+
+```{r, echo=FALSE}
+merged_imp<-merged_imp %>%
+  select(- rows_with_imputed_y)
+head(merged_imp[merged_imp$imputation == 5,])
+#save(merged_imp, file="C:\\Users\\tdsfrc40\\OneDrive - Università degli Studi di Verona\\Z\\Federico_main\\Lavori_Vr\\ongoing\\lavori_gruppo_CB\\NMA\\IPD_NMA_RESHIFT\\aggiornamenti_RE_SHIFT\\dataset_imputed_26_03_25_with_comp.RData")
+#write.xlsx(merged_imp, file = "C:/Users/tdsfrc40/OneDrive - Università degli Studi di Verona/Z/Federico_main/Lavori_Vr/ongoing/lavori_gruppo_CB/NMA/IPD_NMA_RESHIFT/dataset_imp_04_06_25.xlsx",sheetName = "dataset_imp_with_comp", append = FALSE)
+save.image(file="C:\\Users\\tdsfrc40\\OneDrive - Università degli Studi di Verona\\Z\\Federico_main\\Lavori_Vr\\ongoing\\lavori_gruppo_CB\\NMA\\IPD_NMA_RESHIFT\\aggiornamenti_RE_SHIFT\\dataset_imputed_06_09_25_no_Chibanda.RData")
+```
