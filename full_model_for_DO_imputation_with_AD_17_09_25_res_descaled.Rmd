@@ -1,0 +1,1473 @@
+---
+  output:
+  word_document: default
+html_document: default
+---
+
+```{r, include=FALSE}
+### Libraries
+set.seed(126)
+library(rjags)
+library(mice)
+library(tidyr)
+library(MCMCvis)
+library(dplyr)
+options(digits = 2)
+rm(list = ls())
+### Load global merged_imputed dataset
+
+library(readxl)
+aggregate_data <- read_excel("C:/Users/tdsfrc40/OneDrive - Università degli Studi di Verona/Z/Federico_main/Lavori_Vr/ongoing/lavori_gruppo_CB/NMA/IPD_NMA_RESHIFT/dataset_Excel_per_Drop_Out_DP.xlsx")
+aggregate_data<-do.call(cbind.data.frame, aggregate_data)
+
+
+setwd("C:\\Users\\tdsfrc40\\OneDrive - Università degli Studi di Verona\\Z\\Federico_main\\Lavori_Vr\\ongoing\\lavori_gruppo_CB\\NMA\\IPD_NMA_RESHIFT\\aggiornamenti_RE_SHIFT")
+load(file="full_dataset_DO_with_all_interaz.RData")
+#list2env(dataset_merged_imputed_20_03_25_with_comp_all,globalenv())
+#names(merged_imp)[names(merged_imp) == 'clus'] <- 'trialname'
+full_dataset$particId<-as.numeric(as.factor(full_dataset$participantId))
+full_dataset$trialnum<-as.numeric(as.factor(full_dataset$trialname))
+#imputed_data <- imputed_data %>%
+ # rename(particId=participantId)
+#imputed_data <- imputed_data %>%
+ # rename(trialnum=trialname)
+merged_imp <- imputed_data %>%
+  left_join(full_dataset, by = c("trialnum", "particId"))
+merged_imp<-merged_imp %>% select(-ends_with(".y"))
+merged_imp<-merged_imp %>%
+  rename_with(~ sub("\\.x$", "", .x), .cols = ends_with(".x"))
+View(merged_imp)
+#rm(colonna_presente, name, process_dataframe, not_present)
+```
+
+
+```{r names, include=FALSE}
+
+names(merged_imp)[names(merged_imp) == 'clus'] <- 'trialname'
+
+# View(merged_imp) # Commentato per non aprire la finestra durante il knit
+
+
+# --- Sezione per la ricreazione del full_dataset (se necessaria) ---
+
+# Assicurati che 'studiesIPD' contenga i nomi degli oggetti da caricare nell'ambiente globale
+
+# Se 'studiesIPD' sono solo nomi di studi presenti in merged_imp, allora questa sezione
+
+# potrebbe non essere necessaria se `merged_imp` è già il tuo dataset principale IPD.
+
+# Se invece sono file .RData separati che contengono questi studi, allora il loop 'get(study)' è corretto.
+
+
+# Se gli studi sono oggetti separati nell'ambiente R, `get(study)` li recupererà.
+
+# Se `merged_imp` *è* già l'insieme di tutti i dati IPD, allora il blocco `full_study_list`
+
+# e `do.call(rbind, full_study_list)` sono ridondanti per `dataIPD`.
+
+# Suppongo che 'merged_imp' sia il dataset IPD unificato e che 'studiesIPD' si riferisca a meta-informazioni o nomi di studi all'interno di 'merged_imp'.
+
+# Se 'full_dataset' deve essere usato, questa parte è essenziale.
+
+
+studiesIPD_names <- c("Acarturk2022a", "Chibanda2016", "Chowdhary2016", "Cuijpers2022a_Syria", "Cuijpers2022b_Lebanon", "Jordans2019", "Jordans2021", "Khan2019", "Markkula2019", "Matsuzaka2017","Murphy2020", "NakimuliMpungu2020", "Patel2017", "Purgato2021", "Rahman2016", "Rahman2019", "Sangraula2020", "Tol2020", "Z_Acarturk2024", "Z_Acaturk2022b", "Z_Akhtar2021","Z_Bryant2022", "Z_Burchert2024", "Z_DeGraaff2020", "Z_DeGraaff2023", "Z_Spaaji2022", "Z_UNPUBLISHED_CH_main", "Z_UNPUBLISHED_GE_main", "Z_UNPUBLISHED_GE_pilot", "Z_UNPUBLISHED_SW_main")
+
+```
+
+```{r dataIPD, include=FALSE}
+
+# --- Preparazione dati IPD ---
+
+# Il blocco `list` è stato duplicato, l'ho commentato sopra.
+
+# Questo blocco `r, include=FALSE` contiene la preparazione dati IPD.
+
+dataIPD <- merged_imp # Assegna `merged_imp` a `dataIPD`
+
+
+dataIPD <- dataIPD %>%
+
+  rename(treatment = arm) %>%
+
+  mutate(treatment = as.numeric(treatment))
+
+
+# Crea una variabile 'arm' a livello di studio
+
+dataIPD <- dataIPD %>%
+
+  group_by(trialname) %>%
+
+  arrange(treatment) %>%
+
+  mutate(arm = as.numeric(factor(treatment,
+
+                                 levels = unique(treatment)[order(unique(treatment))]))) %>%
+
+  ungroup()
+
+
+# Verifica i valori di treatment e arm
+
+table(dataIPD$trialname, dataIPD$treatment)
+
+table(dataIPD$trialname, dataIPD$arm)
+
+table(dataIPD$treatment, dataIPD$arm)
+
+
+# Definisci le componenti
+
+components <- c("TAU", "PE", "CR", "ACC", "REL", "PM", "BA", "SSS", "IF")
+
+Nc <- length(components)
+
+#dataIPD$dropout<-as.numeric(dataIPD$y)-1
+table(dataIPD$dropout)
+y.ipd <- dataIPD$dropout # Output variabile
+
+
+# Numero di pazienti e studi
+
+Npatients <- nrow(dataIPD)
+
+studiesIPD_unique <- unique(dataIPD$trialname) # Rinominato per chiarezza
+
+Ns.IPD <- length(studiesIPD_unique)
+
+
+# Crea una colonna per gli indici degli studi (trialnum)
+
+#dataIPD$trialnum <- as.numeric(factor(dataIPD$trialname, levels = studiesIPD_unique))
+
+studyIPD <- dataIPD$trialnum # Variabile per JAGS
+
+
+# Creazione della combinazione di trattamenti (comb)
+
+dataIPD$comb <- ""
+
+for (i in 1:Npatients) {
+
+  for (j in which(colnames(dataIPD) == "TAU"):which(colnames(dataIPD) == "IF")) {
+
+    if (dataIPD[i, j] == "1") {
+
+      dataIPD$comb[i] <- paste(dataIPD$comb[i], "+", colnames(dataIPD)[j])
+
+    }
+
+  }
+
+}
+
+dataIPD$comb <- substr(dataIPD$comb, 4, nchar(dataIPD$comb))
+
+
+armIPD <- dataIPD$arm
+
+
+# Creazione delle matrici cIPD_1, cIPD_2, ... per le componenti
+
+# Attenzione: il tuo loop originale creava cIPD_1...cIPD_9 con le colonne 2:3.
+
+# Questo significa che cIPD_1 sarebbe per "TAU", cIPD_2 per "PE", ecc.
+
+# E le colonne sarebbero i due bracci (1 e 2).
+
+# Assicurati che questo sia l'output desiderato per JAGS.
+
+# I nomi cIPD_x (dove x è l'indice della componente) sono corretti per JAGS.
+
+
+# `dataIPD.mock` e `count` non sono più necessari in questo modo, si può fare direttamente.
+
+# La logica del tuo `dataIPD.mock` sembra estrarre una riga per ogni arm unico per studio.
+
+# Questo è quello che serve per creare le matrici di componenti `cIPD_`.
+
+# Riscrivo questo blocco in modo più pulito:
+
+# Crea un dataframe con i dati unici per trialnum e arm per recuperare le componenti
+# Crea un dataframe con i dati unici per trialnum e arm per recuperare le componenti
+# Prepara il dataframe unique_arm_combinations
+# Prepara il dataframe unique_arm_combinations
+unique_arm_combinations <- dataIPD %>%
+  group_by(trialnum, arm) %>%
+  slice(1) %>% # Prendi la prima riga per ogni combinazione studio-braccio
+  ungroup()
+
+for (i in 1:Nc) {
+  component_name <- components[i]
+
+  # Se la colonna della componente è un fattore, convertila a numerico prima di spread
+  if (is.factor(unique_arm_combinations[[component_name]])) {
+    unique_arm_combinations[[component_name]] <- as.numeric(as.character(unique_arm_combinations[[component_name]]))
+  }
+
+  # Seleziona le colonne usando la notazione con le parentesi quadre
+  # Questo è più robusto per la selezione dinamica all'interno dei loop
+  temp_data_for_pivot <- unique_arm_combinations[, c("trialnum", "arm", component_name)]
+
+  # Applica pivot_wider
+  temp_cIPD <- temp_data_for_pivot %>%
+    pivot_wider(names_from = arm, values_from = !!sym(component_name), names_prefix = "arm_")
+
+  # --- MODIFICA CRUCIALE QUI ---
+  # Seleziona solo le colonne che iniziano con 'arm_' e poi converti in matrice.
+  # Usiamo starts_with() all'interno di select() e poi estraiamo i nomi delle colonne
+  # prima di usare la selezione con le parentesi quadre per as.matrix.
+  # Alternativamente, si potrebbe prima estrarre i nomi delle colonne che iniziano per "arm_"
+  # e poi usarli per la selezione con `[]`.
+  cols_to_select <- names(temp_cIPD)[startsWith(names(temp_cIPD), "arm_")]
+  assign(paste0("cIPD_", i), as.matrix(temp_cIPD[, cols_to_select]))
+}
+
+```
+
+
+```{r check_pre_stand, include=FALSE}
+
+# Controlla natura covariate (output nel knitting)
+
+class(dataIPD$baseline)
+
+class(dataIPD$age)
+
+class(dataIPD$gender)
+
+class(dataIPD$edu_bin)
+
+class(dataIPD$stc_bin)
+
+class(dataIPD$empl_bin)
+
+class(dataIPD$y)
+
+
+
+```
+
+
+```{r standardize, include=FALSE}
+
+# Standardizza le covariate
+
+dataIPD$baseline <- as.vector(scale(dataIPD$baseline))
+
+dataIPD$age <- as.vector(scale(dataIPD$age))
+
+# ATTENZIONE: scale(as.numeric(dataIPD$empl_bin)) ecc.
+
+# Se empl_bin, stc_bin, gender sono 0/1, scalarli li rende "continuous" e
+
+# non più 0/1. Questo va bene se vuoi trattarli come variabili continue scalate.
+
+# Se li vuoi come dummy 0/1, non scalarli o usa una dummy reference coding.
+
+# Per VIF, è meglio scalarli.
+
+dataIPD$empl_bin <- as.vector(scale(as.numeric(dataIPD$empl_bin)))
+
+dataIPD$stc_bin <- as.vector(scale(as.numeric(dataIPD$stc_bin)))
+
+dataIPD$gender <- as.vector(scale(as.numeric(as.character(dataIPD$gender))))
+
+
+# I tuoi dati sembrano avere 1, 2, 3. Se 0 è stato mappato a 1, allora levels = c("1", "2", "3") è corretto.
+
+dataIPD$edu_bin <- as.vector(scale(as.numeric(dataIPD$edu_bin)))
+
+
+
+
+
+
+```
+
+```{r aggregate, include=FALSE}
+dataAD <- as.data.frame(aggregate_data)
+
+dataAD2 <- dataAD %>%
+  group_by(id_study) %>%
+  mutate(arm_new = rank(arm, ties.method = "first")) %>% # Assegna 1 e 2 ai bracci per studio
+  filter(arm_new %in% c(1, 2)) %>% # Mantieni solo i primi due bracci
+  ungroup()
+
+# MODIFICA PRINCIPALE: Outcome binario invece di continuo
+dataAD2$r <- dataAD2$post_n_1  # Numeratore: numero di eventi
+dataAD2$n <- dataAD2$random    # Denominatore: numero totale di pazienti
+
+dataAD2$study <- dataAD2$trial_name
+
+# Rimuovi righe con NA nei valori critici
+dataAD2 <- dataAD2[!(is.na(dataAD2$r) | is.na(dataAD2$n)), ]
+
+# Verifica che i valori siano validi (r <= n)
+dataAD2 <- dataAD2[dataAD2$r <= dataAD2$n, ]
+
+Ns <- length(unique(dataAD2$study)) # Numero di studi AD
+studies_AD_unique <- unique(dataAD2$study) # Nomi unici degli studi AD
+
+# Creazione della combinazione di trattamenti (comb) per AD
+dataAD2$comb <- ""
+for (j in 1:length(dataAD2$study)) {
+  for (i in (which(colnames(dataAD2) == "TAU")):(which(colnames(dataAD2) == "IF"))) {
+    if (dataAD2[j, i] == "1") {
+      dataAD2$comb[j] <- paste(dataAD2$comb[j], "+", colnames(dataAD2)[i])
+    }
+  }
+}
+dataAD2$comb <- substr(dataAD2$comb, 4, nchar(dataAD2$comb))
+
+# Creazione delle matrici c1, c2, ... per le componenti AD (RIMANE UGUALE)
+for (i in 1:Nc) {
+  component_name <- components[i]
+  
+  if (is.factor(dataAD2[[component_name]])) {
+    dataAD2[[component_name]] <- as.numeric(as.character(dataAD2[[component_name]]))
+  }
+  
+  temp_data_for_pivot_ad <- dataAD2[, c("study", "arm", component_name)]
+  
+  temp_c <- temp_data_for_pivot_ad %>%
+    pivot_wider(names_from = arm, 
+                values_from = !!sym(component_name), 
+                names_prefix = "arm_")
+  
+  cols_to_select_ad <- names(temp_c)[startsWith(names(temp_c), "arm_")]
+  assign(paste0("c", i), as.matrix(temp_c[, cols_to_select_ad]))
+}
+
+# CREAZIONE DELLE MATRICI PER JAGS (MODIFICATE PER OUTCOME BINARIO)
+# Matrice dei numeratori (eventi)
+r_matrix <- dataAD2 %>%
+  select(study, arm, r) %>%
+  pivot_wider(names_from = arm, values_from = r, names_prefix = "arm_") %>%
+  select(starts_with("arm_")) %>%
+  as.matrix()
+
+# Matrice dei denominatori (totale pazienti)
+n_matrix <- dataAD2 %>%
+  select(study, arm, n) %>%
+  pivot_wider(names_from = arm, values_from = n, names_prefix = "arm_") %>%
+  select(starts_with("arm_")) %>%
+  as.matrix()
+
+# Rinomina le matrici per compatibilità con il codice esistente
+r_i <- r_matrix
+n_i <- n_matrix
+```
+
+```{r cluster, include=FALSE}
+
+# --- Inserimento Cluster (IPD) ---
+
+# Questo blocco è ripetuto, lo mantengo solo una volta qui.
+
+dataIPD <- dataIPD %>%
+
+  group_by(trialname) %>%
+
+  mutate(
+
+    cluster_id_within_study = if (all(is.na(cluster)) | n_distinct(cluster) == 1) {
+
+      as.integer(rep(1, n()))
+
+    } else {
+
+      as.integer(factor(cluster, levels = unique(cluster)))
+
+    },
+
+    n_clusters_within_study = n_distinct(cluster_id_within_study)
+
+  ) %>%
+
+  ungroup()
+
+
+# Verifica la creazione dell'indice (output nel knitting)
+
+# table(dataIPD$trialname, dataIPD$cluster_id_within_study)
+
+
+#dataIPD$y <- dataIPD$dropout # Output variabile
+
+dataIPD$clusterIPD <- dataIPD$cluster_id_within_study # Variabile per JAGS
+
+```
+
+
+
+
+
+```{r check_pre_model, include=FALSE}
+
+# Controlla natura covariate (output nel knitting)
+
+class(dataIPD$baseline)
+
+class(dataIPD$age)
+
+class(dataIPD$gender)
+
+class(dataIPD$edu_bin)
+
+class(dataIPD$stc_bin)
+
+class(dataIPD$empl_bin)
+
+class(dataIPD$y)
+
+# y è ancora fattoriale
+
+```
+
+```{r unique_cluster, include=FALSE}
+library(dplyr)
+unique_cluster_study_pairs <- dataIPD %>%
+  dplyr::select(trialnum, cluster) %>%
+  distinct() %>%
+  arrange(trialnum, cluster) # Ordina per riproducibilità
+
+# Assegna un ID cluster globale sequenziale
+unique_cluster_study_pairs$global_cluster_id <- 1:nrow(unique_cluster_study_pairs)
+
+# Crea la variabile study_for_cluster da passare a JAGS
+# Questa è una mappatura: per ogni global_cluster_id (1 a Nclusters_global)
+# quale trialnum (1 a Ns.IPD) gli corrisponde.
+study_for_cluster_data <- unique_cluster_study_pairs %>%
+  # Usa la selezione base di R con le parentesi quadre
+  # per selezionare le colonne 'global_cluster_id' e 'trialnum'
+  `[`(, c("global_cluster_id", "trialnum")) %>%
+  arrange(global_cluster_id) # Assicurati che sia ordinato per l'indice j in JAGS
+
+# Vettore da passare a JAGS
+#study_for_cluster_jags <- study_for_cluster_data$trialnum
+
+# Aggiorna dataIPD con il nuovo ID cluster globale
+dataIPD <- dataIPD %>%
+  left_join(unique_cluster_study_pairs[, c("trialnum", "cluster", "global_cluster_id")], # Usa la selezione base qui
+            by = c("trialnum", "cluster"))
+
+# Ora le variabili da passare a JAGS saranno:
+# Nclusters_global: il numero totale di cluster globali
+Nclusters_global <- max(dataIPD$global_cluster_id, na.rm = TRUE)
+
+# clusterID_jags: l'indice del cluster globale per ogni paziente
+clusterID_jags <- as.vector(dataIPD$global_cluster_id)
+
+# --- INSERISCI QUESTO CODICE QUI per calcolare N_clusters_per_study_IPD_jags ---
+
+# Calcola il numero di cluster globali unici per ogni trialnum
+# Questo dataframe 'dataIPD' ora contiene 'global_cluster_id'
+N_clusters_per_study_df <- dataIPD %>%
+  group_by(trialnum) %>%
+  summarise(count_clusters = n_distinct(global_cluster_id)) %>%
+  ungroup() %>%
+  arrange(trialnum) # Ordina per trialnum (1, 2, 3...) per un indexing corretto in JAGS
+
+# Crea il vettore da passare a JAGS
+# Questo vettore avrà la lunghezza Ns.IPD e conterrà il numero di cluster PER OGNI STUDIO
+N_clusters_per_study_IPD_jags <- N_clusters_per_study_df$count_clusters
+
+# study_for_cluster_jags: il vettore che mappa l'ID del cluster globale al suo ID di studio
+# (già creato sopra)
+
+``` 
+
+
+```{r model, include=FALSE}
+clusters_summary_by_study <- dataIPD %>%
+  group_by(trialnum) %>%
+  summarise(
+    total_patients_in_study = n(),
+    n_unique_clusters_global = n_distinct(global_cluster_id),
+    list_of_global_cluster_ids = paste(sort(unique(global_cluster_id)), collapse = ", "),
+    # Per verificare anche i cluster originali se 'cluster' è ancora disponibile
+    # n_unique_clusters_original = n_distinct(cluster, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  arrange(trialnum) # Ordina per trialnum per una migliore leggibilità
+
+print(clusters_summary_by_study)
+```
+
+```{r model, include=FALSE}
+summary(dataIPD$dropout)
+#dataIPD$baseline<-dataIPD$baseline*19.0692905788052087+57.3866519281519913
+summary(dataIPD$baseline)
+summary(dataIPD$age)
+table(dataIPD$stc_bin)
+table(dataIPD$empl_bin)
+table(dataIPD$edu_bin)
+```
+
+```{r model, include=FALSE}
+model_DO_con_AD <- "
+model {
+  # --- 1. IPD Likelihood and Model Specification ---
+  # Sigma rimosso per outcome dicotomico
+  
+  # Loop per definire gli effetti a livello di studio-braccio (phi.IPD)
+  for (s in 1:Ns.IPD) {
+    for (a in 1:2) {
+      phi.IPD[s, a] <- u[s] +
+                         d[2] * cIPD_2[s, a] +
+                         d[3] * cIPD_3[s, a] +
+                         d[4] * cIPD_4[s, a] +
+                         d[5] * cIPD_5[s, a] +
+                         d[6] * cIPD_6[s, a] +
+                         d[7] * cIPD_7[s, a] +
+                         d[8] * cIPD_8[s, a] +
+                         d[9] * cIPD_9[s, a]
+    }
+  }
+
+  # Likelihood per i dati IPD a livello paziente (BINOMIALE)
+  for (i in 1:Npatients) {
+    y.ipd[i] ~ dbern(p[i])
+    logit(p[i]) <- phi.IPD[studyIPD[i], arm[i]] + 
+                  cluster.effect[clusterID[i]] * cluster_indicator[studyIPD[i]] +
+                  beta.baseline * baseline[i] +
+                  beta.age * age[i] +
+                  beta.gender * gender[i] +
+                  beta.empl_bin * empl_bin[i] +
+                  beta.stc_bin * stc_bin[i] +
+                  beta.edu_bin * edu_bin[i] +
+                  
+                  # Termini di interazione (stesso codice ma su scala logit)
+                  (gamma.base[2] * cIPD_2[studyIPD[i],arm[i]]* baseline[i] +
+                   gamma.base[3] * cIPD_3[studyIPD[i],arm[i]]* baseline[i] + gamma.base[4] * cIPD_4[studyIPD[i],arm[i]]* baseline[i] + gamma.base[5] * cIPD_5[studyIPD[i],arm[i]]* baseline[i] + gamma.base[6] * cIPD_6[studyIPD[i],arm[i]]* baseline[i] + gamma.base[7] * cIPD_7[studyIPD[i],arm[i]]* baseline[i] + gamma.base[8] * cIPD_8[studyIPD[i],arm[i]]* baseline[i] + gamma.base[9] * cIPD_9[studyIPD[i],arm[i]]* baseline[i] + gamma.age[2] * cIPD_2[studyIPD[i],arm[i]]* age[i] + gamma.age[3] * cIPD_3[studyIPD[i],arm[i]]* age[i] + gamma.age[4] * cIPD_4[studyIPD[i],arm[i]]* age[i] + gamma.age[5] * cIPD_5[studyIPD[i],arm[i]]* age[i] + gamma.age[6] * cIPD_6[studyIPD[i],arm[i]]* age[i] + gamma.age[7] * cIPD_7[studyIPD[i],arm[i]]* age[i] + gamma.age[8] * cIPD_8[studyIPD[i],arm[i]]* age[i] + gamma.age[9] * cIPD_9[studyIPD[i],arm[i]]* age[i] + gamma.gender[2] * cIPD_2[studyIPD[i],arm[i]]* gender[i] + gamma.gender[3] * cIPD_3[studyIPD[i],arm[i]]* gender[i] + gamma.gender[4] * cIPD_4[studyIPD[i],arm[i]]* gender[i] + gamma.gender[5] * cIPD_5[studyIPD[i],arm[i]]* gender[i] + gamma.gender[6] * cIPD_6[studyIPD[i],arm[i]]* gender[i] + gamma.gender[7] * cIPD_7[studyIPD[i],arm[i]]* gender[i] + gamma.gender[8] * cIPD_8[studyIPD[i],arm[i]]* gender[i] + gamma.gender[9] * cIPD_9[studyIPD[i],arm[i]]* gender[i] +  gamma.empl_bin[2] * cIPD_2[studyIPD[i],arm[i]]* empl_bin[i] + gamma.empl_bin[3] * cIPD_3[studyIPD[i],arm[i]]* empl_bin[i] + gamma.empl_bin[4] * cIPD_4[studyIPD[i],arm[i]]* empl_bin[i] + gamma.empl_bin[5] * cIPD_5[studyIPD[i],arm[i]]* empl_bin[i] + gamma.empl_bin[6] * cIPD_6[studyIPD[i],arm[i]]* empl_bin[i] + gamma.empl_bin[7] * cIPD_7[studyIPD[i],arm[i]]* empl_bin[i] + gamma.empl_bin[8] * cIPD_8[studyIPD[i],arm[i]]* empl_bin[i] + gamma.empl_bin[9] * cIPD_9[studyIPD[i],arm[i]]* empl_bin[i] + gamma.stc_bin[2] * cIPD_2[studyIPD[i],arm[i]]* stc_bin[i] + gamma.stc_bin[3] * cIPD_3[studyIPD[i],arm[i]]* stc_bin[i] + gamma.stc_bin[4] * cIPD_4[studyIPD[i],arm[i]]* stc_bin[i] + gamma.stc_bin[5] * cIPD_5[studyIPD[i],arm[i]]* stc_bin[i] + gamma.stc_bin[6] * cIPD_6[studyIPD[i],arm[i]]* stc_bin[i] + gamma.stc_bin[7] * cIPD_7[studyIPD[i],arm[i]]* stc_bin[i] + gamma.stc_bin[8] * cIPD_8[studyIPD[i],arm[i]]* stc_bin[i] + gamma.stc_bin[9] * cIPD_9[studyIPD[i],arm[i]]* stc_bin[i] + gamma.edu_bin[2] * cIPD_2[studyIPD[i],arm[i]]* edu_bin[i] + gamma.edu_bin[3] * cIPD_3[studyIPD[i],arm[i]]* edu_bin[i] + gamma.edu_bin[4] * cIPD_4[studyIPD[i],arm[i]]* edu_bin[i] + gamma.edu_bin[5] * cIPD_5[studyIPD[i],arm[i]]* edu_bin[i] + gamma.edu_bin[6] * cIPD_6[studyIPD[i],arm[i]]* edu_bin[i] + gamma.edu_bin[7] * cIPD_7[studyIPD[i],arm[i]]* edu_bin[i] + gamma.edu_bin[8] * cIPD_8[studyIPD[i],arm[i]]* edu_bin[i] + gamma.edu_bin[9] * cIPD_9[studyIPD[i],arm[i]]* edu_bin[i]) - (
+                   gamma.base[2] * cIPD_2[studyIPD[i],1]* baseline[i] + gamma.base[3] * cIPD_3[studyIPD[i],1]* baseline[i] + gamma.base[4] * cIPD_4[studyIPD[i],1]* baseline[i] + gamma.base[5] * cIPD_5[studyIPD[i],1]* baseline[i] + gamma.base[6] * cIPD_6[studyIPD[i],1]* baseline[i] + gamma.base[7] * cIPD_7[studyIPD[i],1]* baseline[i] + gamma.base[8] * cIPD_8[studyIPD[i],1]* baseline[i] + gamma.base[9] * cIPD_9[studyIPD[i],1]* baseline[i] + gamma.age[2] * cIPD_2[studyIPD[i],1]* age[i] + gamma.age[3] * cIPD_3[studyIPD[i],1]* age[i] + gamma.age[4] * cIPD_4[studyIPD[i],1]* age[i] + gamma.age[5] * cIPD_5[studyIPD[i],1]* age[i] + gamma.age[6] * cIPD_6[studyIPD[i],1]* age[i] + gamma.age[7] * cIPD_7[studyIPD[i],1]* age[i] + gamma.age[8] * cIPD_8[studyIPD[i],1]* age[i] + gamma.age[9] * cIPD_9[studyIPD[i],1]* age[i] + gamma.gender[2] * cIPD_2[studyIPD[i],1]* gender[i] + gamma.gender[3] * cIPD_3[studyIPD[i],1]* gender[i] + gamma.gender[4] * cIPD_4[studyIPD[i],1]* gender[i] + gamma.gender[5] * cIPD_5[studyIPD[i],1]* gender[i] + gamma.gender[6] * cIPD_6[studyIPD[i],1]* gender[i] + gamma.gender[7] * cIPD_7[studyIPD[i],1]* gender[i] + gamma.gender[8] * cIPD_8[studyIPD[i],1]* gender[i] + gamma.gender[9] * cIPD_9[studyIPD[i],1]* gender[i] +  gamma.empl_bin[2] * cIPD_2[studyIPD[i],1]* empl_bin[i] + gamma.empl_bin[3] * cIPD_3[studyIPD[i],1]* empl_bin[i] + gamma.empl_bin[4] * cIPD_4[studyIPD[i],1]* empl_bin[i] + gamma.empl_bin[5] * cIPD_5[studyIPD[i],1]* empl_bin[i] + gamma.empl_bin[6] * cIPD_6[studyIPD[i],1]* empl_bin[i] + gamma.empl_bin[7] * cIPD_7[studyIPD[i],1]* empl_bin[i] + gamma.empl_bin[8] * cIPD_8[studyIPD[i],1]* empl_bin[i] + gamma.empl_bin[9] * cIPD_9[studyIPD[i],1]* empl_bin[i] + gamma.stc_bin[2] * cIPD_2[studyIPD[i],1]* stc_bin[i] + gamma.stc_bin[3] * cIPD_3[studyIPD[i],1]* stc_bin[i] + gamma.stc_bin[4] * cIPD_4[studyIPD[i],1]* stc_bin[i] + gamma.stc_bin[5] * cIPD_5[studyIPD[i],1]* stc_bin[i] + gamma.stc_bin[6] * cIPD_6[studyIPD[i],1]* stc_bin[i] + gamma.stc_bin[7] * cIPD_7[studyIPD[i],1]* stc_bin[i] + gamma.stc_bin[8] * cIPD_8[studyIPD[i],1]* stc_bin[i] + gamma.stc_bin[9] * cIPD_9[studyIPD[i],1]* stc_bin[i] + gamma.edu_bin[2] * cIPD_2[studyIPD[i],1]* edu_bin[i] + gamma.edu_bin[3] * cIPD_3[studyIPD[i],1]* edu_bin[i] + gamma.edu_bin[4] * cIPD_4[studyIPD[i],1]* edu_bin[i] + gamma.edu_bin[5] * cIPD_5[studyIPD[i],1]* edu_bin[i] + gamma.edu_bin[6] * cIPD_6[studyIPD[i],1]* edu_bin[i] + gamma.edu_bin[7] * cIPD_7[studyIPD[i],1]* edu_bin[i] + gamma.edu_bin[8] * cIPD_8[studyIPD[i],1]* edu_bin[i] + gamma.edu_bin[9] * cIPD_9[studyIPD[i],1]* edu_bin[i])
+  }
+
+  # --- 2. Treatment-level effects (IPD studies) ---
+  for (s in 1:Ns.IPD) {
+    delta1[s, 1] <- 0
+    delta1[s, 2] ~ dnorm(md1IPD[s, 2], prect)
+    md1IPD[s, 2] <- (d[2] * cIPD_2[s,2] + d[3] * cIPD_3[s,2] + d[4] * cIPD_4[s,2] + d[5] * cIPD_5[s,2] + d[6] * cIPD_6[s,2] + d[7] * cIPD_7[s,2] + d[8] * cIPD_8[s,2] + d[9] * cIPD_9[s,2]) -
+                    (d[2] * cIPD_2[s,1] + d[3] * cIPD_3[s,1] + d[4] * cIPD_4[s,1] + d[5] * cIPD_5[s,1] + d[6] * cIPD_6[s,1] + d[7] * cIPD_7[s,1] + d[8] * cIPD_8[s,1] + d[9] * cIPD_9[s,1])
+  }
+
+  # --- 3. AD Likelihood and Model Specification (BINOMIALE) ---
+  for (s in 1:Ns) {
+    for (a in 1:2) { # Assuming fixed 2 arms for AD studies
+      r[s, a] ~ dbin(pAD[s, a], n[s, a])
+      logit(pAD[s, a]) <- u[Ns.IPD + s] + deltaAD[s, a] # Use u[Ns.IPD + s] for AD studies' baseline effect
+    }
+
+    # Treatment effects in AD studies (relative to arm 1)
+    deltaAD[s, 1] <- 0
+    deltaAD[s, 2] ~ dnorm(mdAD[s], prec.total.AD)
+    mdAD[s] <- (d[2] * c2[s, 2] + d[3] * c3[s, 2] + d[4] * c4[s, 2] +
+                d[5] * c5[s, 2] + d[6] * c6[s, 2] + d[7] * c7[s, 2] +
+                d[8] * c8[s, 2] + d[9] * c9[s, 2]) -
+               (d[2] * c2[s, 1] + d[3] * c3[s, 1] + d[4] * c4[s, 1] +
+                d[5] * c5[s, 1] + d[6] * c6[s, 1] + d[7] * c7[s, 1] +
+                d[8] * c8[s, 1] + d[9] * c9[s, 1])
+  }
+
+  # --- 4. Priors for Parameters (ADEQUATI PER SCALA LOGIT) ---
+  # Hierarchical prior for study-specific baseline effects (u)
+  for (idx in 1:(Ns.IPD + Ns)) {
+    u[idx] ~ dnorm(0, prec.u)
+  }
+  
+  # Heterogeneity priors - scalati appropriatamente per scala logit
+  tau.u ~ dnorm(0, 0.1)I(0,)  # più informativo
+  prec.u <- 1 / pow(tau.u, 2)
+  
+  tau ~ dnorm(0, 0.1)I(0,)    # più informativo
+  tau.sq <- pow(tau, 2)
+  prect <- 1 / tau.sq
+
+  # Prior per l'eterogeneità aggiuntiva per i dati AD
+  tau.AD.extra ~ dnorm(0, 0.1)I(0,) # Più informativo per scala logit
+  tau.AD.extra.sq <- pow(tau.AD.extra, 2)
+  prec.total.AD <- 1 / (tau.sq + tau.AD.extra.sq)
+
+  # Cluster effects
+  tau.cluster.common ~ dnorm(0, 0.1)I(0,)
+  prec.cluster.common <- 1 / pow(tau.cluster.common, 2)
+
+  for (j in 1:Nclusters) {
+    cluster.effect[j] ~ dnorm(0, prec.cluster.common)
+  }
+
+  # Component effects - prior più conservativi per scala logit
+  d[1] <- 0
+  for (k in 2:Nc) {
+    d[k] ~ dnorm(0, 0.1)  # più informativo
+  }
+
+  # Covariate effects - prior più informativi per scala logit
+  beta.baseline ~ dnorm(0, 0.1)
+  beta.age ~ dnorm(0, 0.1)
+  beta.gender ~ dnorm(0, 0.1)
+  beta.empl_bin ~ dnorm(0, 0.1)
+  beta.stc_bin ~ dnorm(0, 0.1)
+  beta.edu_bin ~ dnorm(0, 0.1)
+
+  # Interaction terms - prior più informativi per scala logit
+  lambda ~ dgamma(3, 10)  # modificato per scala logit
+  for (k in 2:Nc) {
+    gamma.base[k] ~ ddexp(0, lambda)
+    gamma.age[k] ~ ddexp(0, lambda)
+    gamma.gender[k] ~ ddexp(0, lambda)
+    gamma.empl_bin[k] ~ ddexp(0, lambda)
+    gamma.stc_bin[k] ~ ddexp(0, lambda)
+    gamma.edu_bin[k] ~ ddexp(0, lambda)
+  }
+}
+"
+
+``` 
+
+```{r, echo=FALSE}
+samps_lambda_con_AD_binary <- list()
+N.imputed <- 5
+Ns <- 4 # Numero di studi AD, assumendo 4
+
+# Esegui il modello JAGS e salva i campioni
+for (i in 1:N.imputed) {
+  print(paste("Dataset", i))
+  model1.spec <- textConnection(model_DO_con_AD)
+
+  # Prepara i dati IPD
+  y.ipd_i <- as.vector(dataIPD$dropout)
+  studyIPD_i <- as.vector(studyIPD)
+  arm_i <- as.vector(dataIPD$arm)
+  baseline_i <- as.vector(dataIPD$baseline)
+  age_i <- as.vector(dataIPD$age)
+  gender_i <- as.vector(dataIPD$gender)
+  empl_bin_i <- as.vector(dataIPD$empl_bin)
+  edu_bin_i <- as.vector(dataIPD$edu_bin)
+  stc_bin_i <- as.vector(dataIPD$stc_bin)
+  cIPD_2_i <- as.matrix(get("cIPD_2"))
+  cIPD_3_i <- as.matrix(get("cIPD_3"))
+  cIPD_4_i <- as.matrix(get("cIPD_4"))
+  cIPD_5_i <- as.matrix(get("cIPD_5"))
+  cIPD_6_i <- as.matrix(get("cIPD_6"))
+  cIPD_7_i <- as.matrix(get("cIPD_7"))
+  cIPD_8_i <- as.matrix(get("cIPD_8"))
+  cIPD_9_i <- as.matrix(get("cIPD_9"))
+  cluster_indicator_jags <- ifelse(N_clusters_per_study_IPD_jags > 1, 1, 0)
+
+  # Prepara i dati AD (sostituisci dataAD2 con il tuo dataframe)
+  r_AD_i <- matrix(dataAD2$r, nrow = Ns, ncol = 2)
+  n_AD_i <- matrix(dataAD2$n, nrow = Ns, ncol = 2)
+  cAD_2_i <- as.matrix(get("c2"))
+  cAD_3_i <- as.matrix(get("c3"))
+  cAD_4_i <- as.matrix(get("c4"))
+  cAD_5_i <- as.matrix(get("c5"))
+  cAD_6_i <- as.matrix(get("c6"))
+  cAD_7_i <- as.matrix(get("c7"))
+  cAD_8_i <- as.matrix(get("c8"))
+  cAD_9_i <- as.matrix(get("c9"))
+
+  # Crea la lista dei dati per JAGS
+  data_jags <- list(
+    y.ipd = as.vector(dataIPD$dropout),
+    studyIPD = studyIPD_i,
+    arm = as.vector(dataIPD$arm),
+    clusterID = clusterID_jags,
+    Nclusters = Nclusters_global,
+    cluster_indicator = cluster_indicator_jags,
+    cIPD_2 = cIPD_2_i,
+    cIPD_3 = cIPD_3_i,
+    cIPD_4 = cIPD_4_i,
+    cIPD_5 = cIPD_5_i,
+    cIPD_6 = cIPD_6_i,
+    cIPD_7 = cIPD_7_i,
+    cIPD_8 = cIPD_8_i,
+    cIPD_9 = cIPD_9_i,
+    Npatients = Npatients,
+    Ns.IPD = Ns.IPD,
+    r = r_AD_i,
+    n = n_AD_i,
+    c2 = cAD_2_i,
+    c3 = cAD_3_i,
+    c4 = cAD_4_i,
+    c5 = cAD_5_i,
+    c6 = cAD_6_i,
+    c7 = cAD_7_i,
+    c8 = cAD_8_i,
+    c9 = cAD_9_i,
+    baseline = baseline_i,
+    age = age_i,
+    gender = gender_i,
+    empl_bin = empl_bin_i,
+    edu_bin = edu_bin_i,
+    stc_bin = stc_bin_i,
+    Ns = Ns,
+    Nc = Nc
+  )
+
+  jags.m <- jags.model(textConnection(model_DO_con_AD), data = data_jags, n.chains = 2, n.adapt = 500)
+  params <- c("tau", "tau.AD.extra", "tau.cluster.common", "d", "beta.baseline", "gamma.base", "beta.age", "gamma.age",
+              "beta.gender", "gamma.gender", "beta.empl_bin", "gamma.empl_bin",
+              "beta.stc_bin", "gamma.stc_bin", "beta.edu_bin", "gamma.edu_bin")
+  closeAllConnections()
+  samps_lambda_con_AD_binary_temp <- coda.samples(jags.m, params, n.iter = 1000)
+
+  # Salva i campioni nella lista
+  samps_lambda_con_AD_binary[[i]] <- samps_lambda_con_AD_binary_temp
+
+  # Salva i campioni in un file
+  saveRDS(samps_lambda_con_AD_binary_temp, file = paste("samps_lambda_con_AD_binary", i, ".rds", sep = ""))
+}
+# Carica i campioni dai file salvati
+#############################################
+```
+
+```{r IC, echo=FALSE}
+library(coda)
+
+# 1. Carica i dati
+setwd("C:\\Users\\tdsfrc40\\OneDrive - Università degli Studi di Verona\\Z\\Federico_main\\Lavori_Vr\\ongoing\\lavori_gruppo_CB\\NMA\\IPD_NMA_RESHIFT")
+N.imputed <- 5
+samps_lambda_con_AD_binary <- list()
+
+for (i in 1:N.imputed) {
+    file_name <- paste("samps_lambda_con_AD_binary", i, ".rds", sep = "")
+    if (file.exists(file_name)) {
+        samps_lambda_con_AD_binary[[i]] <- readRDS(file_name)
+        print(paste("File caricato:", file_name))
+    } else {
+        print(paste("File non trovato:", file_name))
+    }
+}
+
+if (length(samps_lambda_con_AD_binary) == 0) {
+    stop("Nessun file di campioni caricato. Controlla i nomi dei file.")
+}
+
+# 2. Combina i campioni
+all_chains_lambda <- do.call(rbind, lapply(samps_lambda_con_AD_binary, function(imputation_result) {
+    if (inherits(imputation_result, "mcmc.list")) {
+        do.call(rbind, imputation_result)
+    } else if (inherits(imputation_result, "mcmc")) {
+        as.matrix(imputation_result)
+    } else {
+        stop("Formato inatteso per i risultati caricati.")
+    }
+}))
+
+# 3. Calcola le statistiche trasformate per ciascun parametro
+risultati_comb_con_AD <- list()
+
+for (parametro in colnames(all_chains_lambda)) {
+    campioni <- all_chains_lambda[, parametro]
+    
+    # Trasforma i campioni usando l'esponenziale per passare da log odds-ratio a odds-ratio
+    campioni_OR <- exp(campioni)
+    
+    # Calcola le statistiche (mediana e percentili)
+    mediana <- median(campioni_OR)
+    percentile_2.5 <- quantile(campioni_OR, 0.025)
+    percentile_97.5 <- quantile(campioni_OR, 0.975)
+
+    risultati_comb_con_AD[[parametro]] <- data.frame(
+        median = mediana,
+        percentile_2.5 = percentile_2.5,
+        percentile_97.5 = percentile_97.5,
+        stringsAsFactors = FALSE
+    )
+}
+
+# 4. Combina i risultati in un data frame
+risultati_comb_df <- do.call(rbind, risultati_comb_con_AD)
+
+# 5. Aggiungi i nomi dei parametri come colonna
+risultati_comb_df$parameter <- rownames(risultati_comb_df)
+rownames(risultati_comb_df) <- NULL
+
+# 6. Riordina le colonne per mettere 'parameter' come prima colonna
+# Qui è dove avviene la modifica principale: ho specificato l'ordine delle colonne.
+risultati_comb_df <- risultati_comb_df[, c("parameter", "median", "percentile_2.5", "percentile_97.5")]
+
+# 7. Arrotondamento per una migliore visualizzazione
+#risultati_comb_df$median <- round(risultati_comb_df$median, 5)
+#risultati_comb_df$percentile_2.5 <- round(risultati_comb_df$percentile_2.5, 5)
+#risultati_comb_df$percentile_97.5 <- round(risultati_comb_df$percentile_97.5, 5)
+
+# 8. Visualizza i risultati
+print(risultati_comb_df, digits=3)
+```
+
+
+
+```{r main_component_effects_only, echo=FALSE}
+library(coda)
+library(dplyr)
+library(tibble)
+
+# 1. Carica i dati
+setwd("C:\\Users\\tdsfrc40\\OneDrive - Università degli Studi di Verona\\Z\\Federico_main\\Lavori_Vr\\ongoing\\lavori_gruppo_CB\\NMA\\IPD_NMA_RESHIFT")
+N.imputed <- 5
+samps_lambda_con_AD_binary <- list()
+
+for (i in 1:N.imputed) {
+    file_name <- paste("samps_lambda_con_AD_binary", i, ".rds", sep = "")
+    if (file.exists(file_name)) {
+        samps_lambda_con_AD_binary[[i]] <- readRDS(file_name)
+        print(paste("File caricato:", file_name))
+    } else {
+        print(paste("File non trovato:", file_name))
+    }
+}
+
+if (length(samps_lambda_con_AD_binary) == 0) {
+    stop("Nessun file di campioni caricato. Controlla i nomi dei file.")
+}
+
+# 2. Combina i campioni
+all_chains_lambda <- do.call(rbind, lapply(samps_lambda_con_AD_binary, function(imputation_result) {
+    if (inherits(imputation_result, "mcmc.list")) {
+        do.call(rbind, imputation_result)
+    } else if (inherits(imputation_result, "mcmc")) {
+        as.matrix(imputation_result)
+    } else {
+        stop("Formato inatteso per i risultati caricati.")
+    }
+}))
+
+# 3. Calcola le statistiche trasformate per ciascun parametro
+risultati_comb_con_AD <- list()
+
+for (parametro in colnames(all_chains_lambda)) {
+    campioni <- all_chains_lambda[, parametro]
+    campioni_OR <- exp(campioni)
+    
+    mediana <- median(campioni_OR)
+    percentile_2.5 <- quantile(campioni_OR, 0.025)
+    percentile_97.5 <- quantile(campioni_OR, 0.975)
+
+    risultati_comb_con_AD[[parametro]] <- data.frame(
+        median = mediana,
+        percentile_2.5 = percentile_2.5,
+        percentile_97.5 = percentile_97.5,
+        stringsAsFactors = FALSE
+    )
+}
+
+# 4. Combina i risultati in un data frame
+risultati_comb_df <- do.call(rbind, risultati_comb_con_AD)
+
+# 5. Applica la tua pipeline di filtering e trasformazione
+component_results <- risultati_comb_df %>%
+  tibble::rownames_to_column("parameter") %>%
+  dplyr::filter(grepl("^d\\[", parameter)) %>%
+  dplyr::filter(parameter != "d[1]")
+
+# 6. Arrotondamento dei risultati
+component_results$median <- round(component_results$median, 4)
+component_results$percentile_2.5 <- round(component_results$percentile_2.5, 4)
+component_results$percentile_97.5 <- round(component_results$percentile_97.5, 4)
+
+# 7. Visualizza i risultati
+print(component_results)
+```
+
+
+```{r descaling, echo=FALSE}
+library(coda)
+library(dplyr)
+library(knitr) # Per kable
+
+# --- 1. Definizione dei parametri originali e calcolo delle DS per le binarie ---
+
+# Valori medi e DS originali per variabili continue (forniti dall'utente)
+sd_baseline_orig <- sd(merged_imp$baseline)
+sd_age_orig <- sd(merged_imp$age)
+
+# Education (0=no High School, 1=High School)
+n_no_high_school<-6233
+n_high_school<-4379
+total_education <- n_no_high_school + n_high_school
+prop_high_school <- n_high_school / total_education
+# La DS di una variabile bernoulliana 0/1 è sqrt(p*(1-p))
+#sd_edu_bin_orig <- sqrt(prop_high_school * (1 - prop_high_school))
+edu_bin<-as.numeric(merged_imp$edu_bin)-1
+table(edu_bin)
+
+sd_edu_bin_orig <- sd(edu_bin)
+
+# Frequenze per le variabili categoriche (fornite dall'utente)
+# Gender (0=male, 1=female)
+n_male_gender <- 2934
+n_female_gender <- 7674
+total_gender <- n_male_gender + n_female_gender
+prop_female_gender <- n_female_gender / total_gender
+# La DS di una variabile bernoulliana 0/1 è sqrt(p*(1-p))
+#sd_gender_orig <- sqrt(prop_female_gender * (1 - prop_female_gender))
+gender<-as.numeric(merged_imp$gender)-1
+table(gender)
+sd_gender_orig <- sd(gender)
+
+
+# Marital (stc_bin) (0=Unmarried, 1=Married)
+n_unmarried_stc <- 3265
+n_married_stc <- 7307
+total_stc <- n_unmarried_stc + n_married_stc
+prop_married_stc <- n_married_stc / total_stc
+#sd_stc_bin_orig <- sqrt(prop_married_stc * (1 - prop_married_stc))
+
+stc_bin<-as.numeric(merged_imp$stc_bin)-1
+table(stc_bin)
+
+sd_stc_bin_orig <- sd(stc_bin)
+
+# Employment (empl_bin) (0=Other, 1=Paid work)
+n_other_empl <- 6593
+n_paid_empl <- 3831
+total_empl <- n_other_empl + n_paid_empl
+prop_paid_empl <- n_paid_empl / total_empl
+#sd_empl_bin_orig <- sqrt(prop_paid_empl * (1 - prop_paid_empl))
+
+empl_bin<-as.numeric(merged_imp$empl_bin)-1
+table(empl_bin)
+
+sd_empl_bin_orig <- sd(empl_bin)
+
+
+# Mappatura dei livelli di Education (per l'interpretazione)
+
+
+# --- 2. Caricamento dei campioni MCMC (se non già fatto nello script) ---
+# Questo blocco è cruciale. Assicurati che 'all_chains_lambda ' sia disponibile.
+# Se lo stai eseguendo in uno script separato o dopo aver pulito l'ambiente,
+# devi ricaricare i file .rds o ri-eseguire la parte di caricamento del tuo codice.
+
+# Esempio di ricaricamento (se necessario):
+# setwd("C:\\Users\\tdsfrc40\\OneDrive - Università degli Studi di Verona\\Z\\Federico_main\\Lavori_Vr\\ongoing\\lavori_gruppo_CB\\NMA\\IPD_NMA_RESHIFT\\codici_Orestis\\one_stage_IPD_AD_cNMA")
+# N.imputed <- 5
+# samps_lambda_con_AD_std <- list()
+# for (i in 1:N.imputed) {
+#     file_name <- paste("samps_lambda_con_AD_std_temp_", i, ".rds", sep = "")
+#     if (file.exists(file_name)) {
+#         samps_lambda_con_AD_std[[i]] <- readRDS(file_name)
+#     } else {
+#         warning(paste("File non trovato:", file_name, "Skipping."))
+#     }
+# }
+# if (length(samps_lambda_con_AD_std) == 0) {
+#     stop("Nessun file di campioni caricato. Controlla i nomi dei file o il percorso.")
+# }
+# all_chains_lambda  <- do.call(rbind, lapply(samps_lambda_con_AD_std, function(imputation_result) {
+#     if (inherits(imputation_result, "mcmc.list")) {
+#         do.call(rbind, imputation_result)
+#     } else if (inherits(imputation_result, "mcmc")) {
+#         as.matrix(imputation_result)
+#     } else {
+#         stop("Formato inatteso per i risultati caricati.")
+#     }
+# }))
+
+# --- 3. Estrazione e de-scaling dei campioni dei coefficienti ---
+
+# Funzione per estrarre e de-scalare i campioni di un coefficiente
+# beta_scaled_samples: campioni MCMC del coefficiente dal modello (già scalato)
+# original_sd: la deviazione standard della variabile NON SCALATA (per variabili continue e dicotomiche)
+get_descaled_samples <- function(beta_scaled_samples, original_sd = NULL) {
+    if (is.null(original_sd)) {
+        # Per variabili che non sono state scalate (es. se avessimo avuto dummy non scalate)
+        # o per i contrasti di Education che sono già in unità di effetto
+        return(beta_scaled_samples)
+    } else {
+        # De-scaling: beta_scaled * (1/SD_original) -> No, è beta_scaled / SD_original
+        # Questo perché beta_scaled è l'effetto per 1 SD di cambiamento nel predittore.
+        # Vogliamo l'effetto per 1 UNITÀ di cambiamento.
+        return(beta_scaled_samples / original_sd)
+    }
+}
+
+# Estrai i campioni per i beta dei predittori principali
+beta_baseline_samples <- all_chains_lambda [, "beta.baseline"]
+beta_age_samples <- all_chains_lambda [, "beta.age"]
+beta_gender_samples <- all_chains_lambda [, "beta.gender"]
+beta_empl_bin_samples <- all_chains_lambda [, "beta.empl_bin"]
+beta_stc_bin_samples <- all_chains_lambda [, "beta.stc_bin"]
+beta_edu_bin_samples <- all_chains_lambda [, "beta.edu_bin"]
+
+
+# Calcola gli effetti de-scalati
+effect_baseline_per_unit <- get_descaled_samples(beta_baseline_samples, sd_baseline_orig)
+effect_age_per_unit <- get_descaled_samples(beta_age_samples, sd_age_orig)
+effect_gender_0_to_1 <- get_descaled_samples(beta_gender_samples, sd_gender_orig)
+effect_empl_bin_0_to_1 <- get_descaled_samples(beta_empl_bin_samples, sd_empl_bin_orig)
+effect_stc_bin_0_to_1 <- get_descaled_samples(beta_stc_bin_samples, sd_stc_bin_orig)
+effect_edu_bin_0_to_1 <- get_descaled_samples(beta_edu_bin_samples, sd_edu_bin_orig)
+# Calcola gli effetti per i livelli di istruzione (scostamenti dalla media complessiva)
+# Questi non richiedono de-scaling da SD perché i contrasti sono già basati su differenze di categorie.
+
+
+# --- 4. Funzione per riassumere i campioni MCMC e formattare l'output ---
+# --- 2. Nuova funzione per riassumere i campioni MCMC in Odds Ratio usando la MEDIANA ---
+# Questa funzione esponenzia i campioni prima di calcolare mediana e CI.
+summarize_OR_mcmc_median <- function(samples, digits = 3) {
+    # Applica l'esponenziale a tutti i campioni
+    OR_samples <- exp(samples)
+    
+    # Calcola la mediana e l'intervallo di credibilità sui campioni trasformati
+    median_val <- median(OR_samples)
+    ci <- quantile(OR_samples, probs = c(0.025, 0.975))
+    
+    # Restituisce la stringa formattata
+    return(sprintf(paste0("%.", digits, "f (%.", digits, "f, %.", digits, "f)"), median_val, ci[1], ci[2]))
+}
+
+# --- 3. Creazione della tabella dei risultati ---
+results_df <- data.frame(
+    Predictor = character(),
+    Interpretation = character(),
+    `Odds Ratio (95% Credibility Interval)` = character(),
+    stringsAsFactors = FALSE
+)
+
+# Popola il dataframe con i risultati, utilizzando la nuova funzione
+results_df[nrow(results_df) + 1, ] <- c(
+    "Baseline Score",
+    "Change in Odds Ratio for a 1-unit increase in Baseline Score",
+    summarize_OR_mcmc_median(effect_baseline_per_unit, digits = 3)
+)
+results_df[nrow(results_df) + 1, ] <- c(
+    "Age",
+    "Change in Odds Ratio for a 1-year increase in Age",
+    summarize_OR_mcmc_median(effect_age_per_unit, digits = 3)
+)
+results_df[nrow(results_df) + 1, ] <- c(
+    "Gender",
+    "Odds Ratio of Female vs Male",
+    summarize_OR_mcmc_median(effect_gender_0_to_1, digits = 3)
+)
+results_df[nrow(results_df) + 1, ] <- c(
+    "Employment Status",
+    "Odds Ratio of Paid Work vs Other",
+    summarize_OR_mcmc_median(effect_empl_bin_0_to_1, digits = 3)
+)
+results_df[nrow(results_df) + 1, ] <- c(
+    "Marital Status",
+    "Odds Ratio of Married vs Unmarried",
+    summarize_OR_mcmc_median(effect_stc_bin_0_to_1, digits = 3)
+)
+results_df[nrow(results_df) + 1, ] <- c(
+    "Education",
+    "Odds Ratio of High School vs No High School",
+    summarize_OR_mcmc_median(effect_edu_bin_0_to_1, digits = 3)
+)
+
+# Stampa la tabella
+print("Tabella dei risultati dei predittori (Odds Ratio, stima basata sulla mediana):")
+print(knitr::kable(results_df, caption = "Interpreted Predictor Effects (Odds Ratio, based on Median)", align = c('l', 'l', 'c')))
+```
+
+```{r scaled_OR, include=FALSE}
+#sd_baseline_orig <- sd(merged_imp$baseline)
+
+sd_PE_orig <- sd(merged_imp$PE)
+
+sd_CR_orig <- sd(merged_imp$CR)
+
+sd_ACC_orig <- sd(merged_imp$ACC)
+
+sd_REL_orig <- sd(merged_imp$REL)
+
+sd_PM_orig <- sd(merged_imp$PM)
+
+sd_BA_orig <- sd(merged_imp$BA)
+
+sd_SSS_orig <- sd(merged_imp$SSS)
+
+sd_IF_orig <- sd(merged_imp$IF)
+
+
+
+get_scaled_samples <- function(beta_original_samples, original_sd = NULL) {
+
+    if (is.null(original_sd)) {
+
+        # Per variabili che non sono state scalate (es. se avessimo avuto dummy non scalate)
+
+        # o per i contrasti di Education che sono già in unità di effetto
+
+        return(beta_original_samples)
+
+    } else {
+
+        # Scaling: beta_original * SD_original
+
+        # Questo perché beta_original è l'effetto per 1 UNITÀ di cambiamento nel predittore.
+
+        # Vogliamo l'effetto per 1 SD di cambiamento.
+
+        return(beta_original_samples * original_sd)
+
+    }
+
+}
+
+
+# Assumi che i coefficienti non siano già de-scalati
+
+# Estrai i campioni per i beta dei predittori principali (qui sono i valori "originali")
+
+beta_PE_original_samples <- all_chains_lambda [, "d[2]"]
+
+beta_CR_original_samples <- all_chains_lambda [, "d[3]"]
+
+beta_ACC_original_samples <- all_chains_lambda [, "d[4]"]
+
+beta_REL_original_samples <- all_chains_lambda [, "d[5]"]
+
+beta_PM_original_samples <- all_chains_lambda [, "d[6]"]
+
+beta_BA_original_samples <- all_chains_lambda [, "d[7]"]
+
+beta_SSS_original_samples <- all_chains_lambda [, "d[8]"]
+
+beta_IF_original_samples <- all_chains_lambda [, "d[9]"]
+
+
+# Calcola gli effetti scalati
+
+
+effect_PE_scaled <- get_scaled_samples(beta_PE_original_samples, sd_PE_orig)
+
+effect_CR_scaled <- get_scaled_samples(beta_CR_original_samples, sd_CR_orig)
+
+effect_ACC_scaled <- get_scaled_samples(beta_ACC_original_samples, sd_ACC_orig)
+
+effect_REL_scaled <- get_scaled_samples(beta_REL_original_samples, sd_REL_orig)
+
+effect_PM_scaled <- get_scaled_samples(beta_PM_original_samples, sd_PM_orig)
+
+effect_BA_scaled <- get_scaled_samples(beta_BA_original_samples, sd_BA_orig)
+
+effect_SSS_scaled <- get_scaled_samples(beta_SSS_original_samples, sd_SSS_orig)
+
+effect_IF_scaled <- get_scaled_samples(beta_IF_original_samples, sd_IF_orig)
+
+
+
+# --- 4. Funzione per riassumere i campioni MCMC e formattare l'output ---
+
+summarize_mcmc_effect <- function(samples, digits = 3) {
+
+    median_val <- median(samples)
+
+    ci <- quantile(samples, probs = c(0.025, 0.975))
+
+    return(sprintf(paste0("%.", digits, "f (%.", digits, "f, %.", digits, "f)"), median_val, ci[1], ci[2]))
+
+}
+
+
+# --- 5. Creazione della tabella dei risultati ---
+
+results_df_scaled <- data.frame(
+
+    Predictor = character(),
+
+    Interpretation = character(),
+
+    `Mean (95% Credibility Interval)` = character(),
+
+    stringsAsFactors = FALSE
+
+)
+
+
+# Popola il dataframe con i risultati
+
+results_df_scaled[nrow(results_df_scaled) + 1, ] <- c(
+
+    "PE",
+
+    "Change in outcome for a 1-SD increase in PE",
+
+    summarize_mcmc_effect(effect_PE_scaled, digits = 3)
+
+)
+
+results_df_scaled[nrow(results_df_scaled) + 1, ] <- c(
+
+    "CR",
+
+    "Change in outcome for a 1-SD increase in CR",
+
+    summarize_mcmc_effect(effect_CR_scaled, digits = 3)
+
+)
+
+results_df_scaled[nrow(results_df_scaled) + 1, ] <- c(
+
+    "ACC",
+
+    "Change in outcome for a 1-SD increase in ACC",
+
+    summarize_mcmc_effect(effect_ACC_scaled, digits = 3)
+
+)
+
+results_df_scaled[nrow(results_df_scaled) + 1, ] <- c(
+
+    "REL",
+
+    "Change in outcome for a 1-SD increase in REL",
+
+    summarize_mcmc_effect(effect_REL_scaled, digits = 3)
+
+)
+
+results_df_scaled[nrow(results_df_scaled) + 1, ] <- c(
+
+    "PM",
+
+    "Change in outcome for a 1-SD increase in PM",
+
+    summarize_mcmc_effect(effect_PM_scaled, digits = 3)
+
+)
+
+results_df_scaled[nrow(results_df_scaled) + 1, ] <- c(
+
+    "BA",
+
+    "Change in outcome for a 1-SD increase in BA",
+
+    summarize_mcmc_effect(effect_BA_scaled, digits = 3)
+
+)
+
+results_df_scaled[nrow(results_df_scaled) + 1, ] <- c(
+
+    "SSS",
+
+    "Change in outcome for a 1-SD increase in SSS",
+
+    summarize_mcmc_effect(effect_SSS_scaled, digits = 3)
+
+)
+
+results_df_scaled[nrow(results_df_scaled) + 1, ] <- c(
+
+    "IF",
+
+    "Change in outcome for a 1-SD increase in IF",
+
+    summarize_mcmc_effect(effect_IF_scaled, digits = 3)
+
+)
+
+print(results_df_scaled) 
+```
+
+```{r scaled_OR, include=FALSE}
+
+library(coda)
+library(dplyr)
+library(knitr) # Per kable
+
+# [Il tuo codice per caricare i dati e calcolare le DS]...
+# Assicurati che 'merged_imp' e 'all_chains_lambda' siano disponibili nel tuo ambiente
+sd_baseline_orig <- sd(merged_imp$baseline)
+sd_PE_orig <- sd(merged_imp$PE)
+sd_CR_orig <- sd(merged_imp$CR)
+sd_ACC_orig <- sd(merged_imp$ACC)
+sd_REL_orig <- sd(merged_imp$REL)
+sd_PM_orig <- sd(merged_imp$PM)
+sd_BA_orig <- sd(merged_imp$BA)
+sd_SSS_orig <- sd(merged_imp$SSS)
+sd_IF_orig <- sd(merged_imp$IF)
+
+# --- 1. Funzione per scalare i campioni (nessuna modifica qui) ---
+get_scaled_OR_samples <- function(beta_original_samples, original_sd = NULL) {
+    if (is.null(original_sd)) {
+        return(beta_original_samples)
+    } else {
+        return(beta_original_samples * original_sd)
+    }
+}
+
+# --- 2. Estrazione e scaling dei campioni dei coefficienti (nessuna modifica qui) ---
+beta_baseline_original_samples <- all_chains_lambda [, "beta.baseline"]
+beta_PE_original_samples <- all_chains_lambda [, "d[2]"]
+beta_CR_original_samples <- all_chains_lambda [, "d[3]"]
+beta_ACC_original_samples <- all_chains_lambda [, "d[4]"]
+beta_REL_original_samples <- all_chains_lambda [, "d[5]"]
+beta_PM_original_samples <- all_chains_lambda [, "d[6]"]
+beta_BA_original_samples <- all_chains_lambda [, "d[7]"]
+beta_SSS_original_samples <- all_chains_lambda [, "d[8]"]
+beta_IF_original_samples <- all_chains_lambda [, "d[9]"]
+
+effect_baseline_scaled_OR <- get_scaled_OR_samples(beta_baseline_original_samples, sd_baseline_orig)
+effect_PE_scaled_OR <- get_scaled_OR_samples(beta_PE_original_samples, sd_PE_orig)
+effect_CR_scaled_OR <- get_scaled_OR_samples(beta_CR_original_samples, sd_CR_orig)
+effect_ACC_scaled_OR <- get_scaled_OR_samples(beta_ACC_original_samples, sd_ACC_orig)
+effect_REL_scaled_OR <- get_scaled_OR_samples(beta_REL_original_samples, sd_REL_orig)
+effect_PM_scaled_OR <- get_scaled_OR_samples(beta_PM_original_samples, sd_PM_orig)
+effect_BA_scaled_OR <- get_scaled_OR_samples(beta_BA_original_samples, sd_BA_orig)
+effect_SSS_scaled_OR <- get_scaled_OR_samples(beta_SSS_original_samples, sd_SSS_orig)
+effect_IF_scaled_OR <- get_scaled_OR_samples(beta_IF_original_samples, sd_IF_orig)
+
+
+# --- 3. Nuova funzione per riassumere i campioni MCMC in Odds Ratio usando la MEDIANA ---
+# Questa funzione è la stessa che abbiamo usato nel codice precedente.
+summarize_OR_mcmc_median <- function(samples, digits = 3) {
+    # Applica l'esponenziale a tutti i campioni
+    OR_samples <- exp(samples)
+    
+    # Calcola la mediana e l'intervallo di credibilità sui campioni trasformati
+    median_val <- median(OR_samples)
+    ci <- quantile(OR_samples, probs = c(0.025, 0.975))
+    
+    # Restituisce la stringa formattata
+    return(sprintf(paste0("%.", digits, "f (%.", digits, "f, %.", digits, "f)"), median_val, ci[1], ci[2]))
+}
+
+# --- 4. Creazione della tabella dei risultati ---
+results_df_scaled_OR <- data.frame(
+    Predictor = character(),
+    Interpretation = character(),
+    `Odds Ratio (95% Credibility Interval)` = character(),
+    stringsAsFactors = FALSE
+)
+
+# Popola il dataframe con i risultati, utilizzando la nuova funzione
+results_df_scaled_OR[nrow(results_df_scaled_OR) + 1, ] <- c(
+    "Baseline Score",
+    "Odds Ratio for a 1-SD increase in Baseline Score",
+    summarize_OR_mcmc_median(effect_baseline_scaled_OR, digits = 3)
+)
+results_df_scaled_OR[nrow(results_df_scaled_OR) + 1, ] <- c(
+    "PE",
+    "Odds Ratio for a 1-SD increase in PE",
+    summarize_OR_mcmc_median(effect_PE_scaled_OR, digits = 3)
+)
+results_df_scaled_OR[nrow(results_df_scaled_OR) + 1, ] <- c(
+    "CR",
+    "Odds Ratio for a 1-SD increase in CR",
+    summarize_OR_mcmc_median(effect_CR_scaled_OR, digits = 3)
+)
+results_df_scaled_OR[nrow(results_df_scaled_OR) + 1, ] <- c(
+    "ACC",
+    "Odds Ratio for a 1-SD increase in ACC",
+    summarize_OR_mcmc_median(effect_ACC_scaled_OR, digits = 3)
+)
+results_df_scaled_OR[nrow(results_df_scaled_OR) + 1, ] <- c(
+    "REL",
+    "Odds Ratio for a 1-SD increase in REL",
+    summarize_OR_mcmc_median(effect_REL_scaled_OR, digits = 3)
+)
+results_df_scaled_OR[nrow(results_df_scaled_OR) + 1, ] <- c(
+    "PM",
+    "Odds Ratio for a 1-SD increase in PM",
+    summarize_OR_mcmc_median(effect_PM_scaled_OR, digits = 3)
+)
+results_df_scaled_OR[nrow(results_df_scaled_OR) + 1, ] <- c(
+    "BA",
+    "Odds Ratio for a 1-SD increase in BA",
+    summarize_OR_mcmc_median(effect_BA_scaled_OR, digits = 3)
+)
+results_df_scaled_OR[nrow(results_df_scaled_OR) + 1, ] <- c(
+    "SSS",
+    "Odds Ratio for a 1-SD increase in SSS",
+    summarize_OR_mcmc_median(effect_SSS_scaled_OR, digits = 3)
+)
+results_df_scaled_OR[nrow(results_df_scaled_OR) + 1, ] <- c(
+    "IF",
+    "Odds Ratio for a 1-SD increase in IF",
+    summarize_OR_mcmc_median(effect_IF_scaled_OR, digits = 3)
+)
+
+print(results_df_scaled_OR)
+
+```
+
+```{r descale_interaz, include=FALSE}
+# ==========================================================
+#  COEFFICIENTI DI INTERAZIONE (gamma.*) - DE-SCALING
+# ==========================================================
+
+# Mappatura tra il nome nei dati e quello nel modello JAGS
+covariate_map <- list(
+  baseline   = "base",       # baseline → gamma.base[…]
+  age        = "age",
+  gender     = "gender",
+  empl_bin   = "empl_bin",
+  stc_bin    = "stc_bin",
+  edu_bin    = "edu_bin"
+)
+
+# SD originali (già calcolate)
+sd_list <- list(
+  baseline = sd_baseline_orig,
+  age = sd_age_orig,
+  gender = sd_gender_orig,
+  empl_bin = sd_empl_bin_orig,
+  stc_bin = sd_stc_bin_orig,
+  edu_bin = sd_edu_bin_orig
+)
+
+# Funzione per estrarre tutte le colonne gamma.* corrispondenti a una covariata
+extract_gamma_samples <- function(mat, var_pattern) {
+  gamma_cols <- grep(paste0("^gamma\\.", var_pattern, "(\\[|$)"), colnames(mat), value = TRUE)
+  if (length(gamma_cols) == 0) return(NULL)
+  return(mat[, gamma_cols, drop = FALSE])
+}
+
+results_gamma_df <- data.frame(
+  Interaction = character(),
+  Component = character(),
+  `Odds Ratio (95% Credibility Interval)` = character(),
+  stringsAsFactors = FALSE
+)
+
+# Loop su ciascuna covariata (usando la mappatura)
+for (cov_real in names(covariate_map)) {
+  cov_model <- covariate_map[[cov_real]]
+  gamma_mat <- extract_gamma_samples(all_chains_mat, cov_model)
+  if (is.null(gamma_mat)) next
+  
+  for (colname in colnames(gamma_mat)) {
+    gamma_samples <- as.numeric(gamma_mat[, colname])
+    
+    # De-scaling sui campioni di log-OR
+    gamma_descaled <- gamma_samples / sd_list[[cov_real]]
+    
+    # Converti in OR
+    OR_samples <- exp(gamma_descaled)
+    
+    # Riassunto
+    median_val <- median(OR_samples, na.rm = TRUE)
+    ci <- quantile(OR_samples, probs = c(0.025, 0.975), na.rm = TRUE)
+    
+    # Identifica il nome della componente (dentro le parentesi quadre)
+    component_name <- sub(".*\\[(.*)\\]", "\\1", colname)
+    if (component_name == colname) component_name <- "(global)"
+    
+    # Aggiungi riga alla tabella
+    results_gamma_df[nrow(results_gamma_df) + 1, ] <- c(
+      paste(cov_real, "× component", sep = " "),
+      component_name,
+      sprintf("%.3f (%.3f, %.3f)", median_val, ci[1], ci[2])
+    )
+  }
+}
+
+results_gamma_df <- results_gamma_df %>% arrange(Interaction, Component)
+
+cat("Tabella dei coefficienti di interazione de-scalati (Odds Ratio, mediana [95% CI]):\n")
+print(knitr::kable(
+  results_gamma_df,
+  caption = "Interazioni Covariata × Componente (de-scalate, OR basati sulla mediana)",
+  align = c('l', 'l', 'c')
+))
+
+
+```
+
