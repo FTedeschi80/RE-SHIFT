@@ -898,4 +898,5 @@ print(knitr::kable(
   align = c('l', 'l', 'c')
 ))
 results_gamma_cont_df 
+
 ```
