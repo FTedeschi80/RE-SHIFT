@@ -1,0 +1,888 @@
+---
+  output:
+  word_document: default
+html_document: default
+---
+
+```{r, include=FALSE}
+
+set.seed(126)
+library(rjags)
+library(mice)
+library(tidyr)
+library(MCMCvis)
+library(dplyr)
+options(digits = 2)
+rm(list = ls())
+
+library(readxl)
+
+setwd("C:/Users/tdsfrc40/OneDrive - Università degli Studi di Verona/Z/Federico_main/Lavori_Vr/ongoing/lavori_gruppo_CB/NMA/IPD_NMA_RESHIFT/an_new_dataset_Jan_26")
+
+load(file="dataset_imputed_21_01_26_pct.RData")
+
+names(merged_imp)[names(merged_imp) == 'clus'] <- 'trialname'
+```
+
+
+```{r names, include=FALSE}
+
+studiesIPD_names <- c("Acarturk2022a", "Chibanda2016", "Chowdhary2016", "Cuijpers2022a_Syria", "Cuijpers2022b_Lebanon", "Jordans2019", "Jordans2021", "Khan2019", "Markkula2019", "Matsuzaka2017","Murphy2020", "NakimuliMpungu2020", "Patel2017", "Purgato2021", "Rahman2016", "Rahman2019", "Sangraula2020", "Tol2020", "Z_Acarturk2024", "Z_Acaturk2022b", "Z_Akhtar2021","Z_Bryant2022", "Z_Burchert2024", "Z_DeGraaff2020", "Z_DeGraaff2023", "Z_Spaaji2022", "Z_UNPUBLISHED_CH_main", "Z_UNPUBLISHED_GE_main", "Z_UNPUBLISHED_GE_pilot", "Z_UNPUBLISHED_SW_main")
+
+
+```
+
+```{r dataIPD, include=FALSE}
+merged_imp$arm <- factor(merged_imp$arm,
+                          levels = c(1,2,3,4,5,6,7,8,9,10,11))
+summary(merged_imp$age)
+merged_imp$age[merged_imp$age < 16] <- 16
+summary(merged_imp$baseline)
+merged_imp$baseline[merged_imp$baseline > 100] <- 100
+merged_imp$baseline[merged_imp$baseline < 0] <- 0
+dataIPD <- merged_imp # Assegna `merged_imp` a `dataIPD`
+
+
+
+dataIPD <- dataIPD %>%
+
+  rename(treatment = arm) %>%
+
+  mutate(treatment = as.numeric(treatment))
+
+
+dataIPD <- dataIPD %>%
+
+  group_by(trialname) %>%
+
+  arrange(treatment) %>%
+
+  mutate(arm = as.numeric(factor(treatment,
+
+                                 levels = unique(treatment)[order(unique(treatment))]))) %>%
+
+  ungroup()
+
+
+table(dataIPD$trialname, dataIPD$treatment)
+
+table(dataIPD$trialname, dataIPD$arm)
+
+table(dataIPD$treatment, dataIPD$arm)
+
+
+components <- c("TAU", "PE", "CR", "ACC", "REL", "PM", "BA", "SSS", "IF")
+
+Nc <- length(components)
+
+
+y.ipd <- dataIPD$endpoint 
+
+Npatients <- nrow(dataIPD)
+
+studiesIPD_unique <- unique(dataIPD$trialname) 
+
+Ns.IPD <- length(studiesIPD_unique)
+
+
+
+dataIPD$studlab <- as.numeric(factor(dataIPD$trialname, levels = studiesIPD_unique))
+
+studyIPD <- dataIPD$studlab 
+
+dataIPD$comb <- ""
+
+for (i in 1:Npatients) {
+
+  for (j in which(colnames(dataIPD) == "TAU"):which(colnames(dataIPD) == "IF")) {
+
+    if (dataIPD[i, j] == "1") {
+
+      dataIPD$comb[i] <- paste(dataIPD$comb[i], "+", colnames(dataIPD)[j])
+
+    }
+
+  }
+
+}
+
+dataIPD$comb <- substr(dataIPD$comb, 4, nchar(dataIPD$comb))
+
+
+armIPD <- dataIPD$arm
+
+
+unique_arm_combinations <- dataIPD %>%
+  group_by(studlab, arm) %>%
+  slice(1) %>% 
+  ungroup()
+
+for (i in 1:Nc) {
+  component_name <- components[i]
+
+  if (is.factor(unique_arm_combinations[[component_name]])) {
+    unique_arm_combinations[[component_name]] <- as.numeric(as.character(unique_arm_combinations[[component_name]]))
+  }
+
+
+  temp_data_for_pivot <- unique_arm_combinations[, c("studlab", "arm", component_name)]
+
+  temp_cIPD <- temp_data_for_pivot %>%
+    pivot_wider(names_from = arm, values_from = !!sym(component_name), names_prefix = "arm_")
+
+  cols_to_select <- names(temp_cIPD)[startsWith(names(temp_cIPD), "arm_")]
+  assign(paste0("cIPD_", i), as.matrix(temp_cIPD[, cols_to_select]))
+}
+
+```
+
+
+```{r check_pre_stand, include=FALSE}
+
+
+class(dataIPD$baseline)
+
+class(dataIPD$age)
+
+class(dataIPD$gender)
+
+class(dataIPD$edu_bin)
+
+class(dataIPD$stc_bin)
+
+class(dataIPD$empl_bin)
+
+
+```
+
+
+```{r standardize, include=FALSE}
+
+dataIPD$age <- as.vector(scale(dataIPD$age))
+
+dataIPD$empl_bin <- as.vector(scale(as.numeric(dataIPD$empl_bin)))
+
+dataIPD$stc_bin <- as.vector(scale(as.numeric(dataIPD$stc_bin)))
+
+dataIPD$gender <- as.vector(scale(as.numeric(as.character(dataIPD$gender))))
+
+
+dataIPD$edu_bin <- as.vector(scale(as.numeric(dataIPD$edu_bin)))
+dataIPD <- dataIPD %>%
+
+  group_by(trialname) %>%
+
+  mutate(
+
+    cluster_id_within_study = if (all(is.na(cluster)) | n_distinct(cluster) == 1) {
+
+      as.integer(rep(1, n()))
+
+    } else {
+
+      as.integer(factor(cluster, levels = unique(cluster)))
+
+    },
+
+    n_clusters_within_study = n_distinct(cluster_id_within_study)
+
+  ) %>%
+
+  ungroup()
+
+
+dataIPD$y <- dataIPD$endpoint
+
+dataIPD$clusterIPD <- dataIPD$cluster_id_within_study 
+```
+
+
+```{r check_pre_model, include=FALSE}
+class(dataIPD$baseline)
+
+class(dataIPD$age)
+
+class(dataIPD$gender)
+
+class(dataIPD$edu_bin)
+
+class(dataIPD$stc_bin)
+
+class(dataIPD$empl_bin)
+
+```
+
+```{r cluster, include=FALSE}
+unique_cluster_study_pairs <- dataIPD %>%
+  select(studlab, cluster) %>%
+  distinct() %>%
+  arrange(studlab, cluster) 
+
+unique_cluster_study_pairs$global_cluster_id <- 1:nrow(unique_cluster_study_pairs)
+
+study_for_cluster_data <- unique_cluster_study_pairs %>%
+
+  `[`(, c("global_cluster_id", "studlab")) %>%
+  arrange(global_cluster_id) 
+
+dataIPD <- dataIPD %>%
+  left_join(unique_cluster_study_pairs[, c("studlab", "cluster", "global_cluster_id")], 
+            by = c("studlab", "cluster"))
+
+Nclusters_global <- max(dataIPD$global_cluster_id, na.rm = TRUE)
+
+clusterID_jags <- as.vector(dataIPD$global_cluster_id)
+
+N_clusters_per_study_df <- dataIPD %>%
+  group_by(studlab) %>%
+  summarise(count_clusters = n_distinct(global_cluster_id)) %>%
+  ungroup() %>%
+  arrange(studlab)
+
+N_clusters_per_study_IPD_jags <- N_clusters_per_study_df$count_clusters
+``` 
+
+
+```{r model, include=FALSE}
+clusters_summary_by_study <- dataIPD %>%
+  group_by(studlab) %>%
+  summarise(
+    total_patients_in_study = n(),
+    n_unique_clusters_global = n_distinct(global_cluster_id),
+    list_of_global_cluster_ids = paste(sort(unique(global_cluster_id)), collapse = ", "),
+  ) %>%
+  ungroup() %>%
+  arrange(studlab)
+
+print(clusters_summary_by_study)
+```
+
+```{r model, include=FALSE}
+summary(dataIPD$endpoint)
+summary(dataIPD$baseline)
+
+dataIPD$baseline<-dataIPD$baseline-mean(dataIPD$baseline)
+
+```
+
+```{r model, include=FALSE}
+model1_common_pct <- "
+model {
+  prec.pat <- 1 / (sigma * sigma)
+  sigma ~ dnorm(0, 0.01)I(0,) # Prior for residual standard deviation (IPD)
+
+  for (s in 1:Ns.IPD) {
+    for (a in 1:2) {
+      phi.IPD[s, a] <- u[s] +
+                         d[2] * cIPD_2[s, a] +
+                         d[3] * cIPD_3[s, a] +
+                         d[4] * cIPD_4[s, a] +
+                         d[5] * cIPD_5[s, a] +
+                         d[6] * cIPD_6[s, a] +
+                         d[7] * cIPD_7[s, a] +
+                         d[8] * cIPD_8[s, a] +
+                         d[9] * cIPD_9[s, a]
+    }
+  }
+
+  for (i in 1:Npatients) {
+    y.ipd[i] ~ dnorm(muIPD[i], prec.pat)
+    muIPD[i] <- phi.IPD[studyIPD[i], arm[i]] + 
+    cluster.effect[clusterID[i]] * cluster_indicator[studyIPD[i]] + # Effetto cluster
+                  beta.baseline * baseline[i] + 
+                  beta.age * age[i] +
+                  beta.gender * gender[i] +
+                  beta.empl_bin * empl_bin[i] +
+                  beta.stc_bin * stc_bin[i] +
+                  beta.edu_bin * edu_bin[i] +
+              
+                  ( gamma.base[2] * cIPD_2[studyIPD[i],arm[i]]* baseline[i] +
+                   gamma.base[3] * cIPD_3[studyIPD[i],arm[i]]* baseline[i] + gamma.base[4] * cIPD_4[studyIPD[i],arm[i]]* baseline[i] + gamma.base[5] * cIPD_5[studyIPD[i],arm[i]]* baseline[i] + gamma.base[6] * cIPD_6[studyIPD[i],arm[i]]* baseline[i] + gamma.base[7] * cIPD_7[studyIPD[i],arm[i]]* baseline[i] + gamma.base[8] * cIPD_8[studyIPD[i],arm[i]]* baseline[i] + gamma.base[9] * cIPD_9[studyIPD[i],arm[i]]* baseline[i] + gamma.age[2] * cIPD_2[studyIPD[i],arm[i]]* age[i] + gamma.age[3] * cIPD_3[studyIPD[i],arm[i]]* age[i] + gamma.age[4] * cIPD_4[studyIPD[i],arm[i]]* age[i] + gamma.age[5] * cIPD_5[studyIPD[i],arm[i]]* age[i] + gamma.age[6] * cIPD_6[studyIPD[i],arm[i]]* age[i] + gamma.age[7] * cIPD_7[studyIPD[i],arm[i]]* age[i] + gamma.age[8] * cIPD_8[studyIPD[i],arm[i]]* age[i] + gamma.age[9] * cIPD_9[studyIPD[i],arm[i]]* age[i] + gamma.gender[2] * cIPD_2[studyIPD[i],arm[i]]* gender[i] + gamma.gender[3] * cIPD_3[studyIPD[i],arm[i]]* gender[i] + gamma.gender[4] * cIPD_4[studyIPD[i],arm[i]]* gender[i] + gamma.gender[5] * cIPD_5[studyIPD[i],arm[i]]* gender[i] + gamma.gender[6] * cIPD_6[studyIPD[i],arm[i]]* gender[i] + gamma.gender[7] * cIPD_7[studyIPD[i],arm[i]]* gender[i] + gamma.gender[8] * cIPD_8[studyIPD[i],arm[i]]* gender[i] + gamma.gender[9] * cIPD_9[studyIPD[i],arm[i]]* gender[i] +  gamma.empl_bin[2] * cIPD_2[studyIPD[i],arm[i]]* empl_bin[i] + gamma.empl_bin[3] * cIPD_3[studyIPD[i],arm[i]]* empl_bin[i] + gamma.empl_bin[4] * cIPD_4[studyIPD[i],arm[i]]* empl_bin[i] + gamma.empl_bin[5] * cIPD_5[studyIPD[i],arm[i]]* empl_bin[i] + gamma.empl_bin[6] * cIPD_6[studyIPD[i],arm[i]]* empl_bin[i] + gamma.empl_bin[7] * cIPD_7[studyIPD[i],arm[i]]* empl_bin[i] + gamma.empl_bin[8] * cIPD_8[studyIPD[i],arm[i]]* empl_bin[i] + gamma.empl_bin[9] * cIPD_9[studyIPD[i],arm[i]]* empl_bin[i] + gamma.stc_bin[2] * cIPD_2[studyIPD[i],arm[i]]* stc_bin[i] + gamma.stc_bin[3] * cIPD_3[studyIPD[i],arm[i]]* stc_bin[i] + gamma.stc_bin[4] * cIPD_4[studyIPD[i],arm[i]]* stc_bin[i] + gamma.stc_bin[5] * cIPD_5[studyIPD[i],arm[i]]* stc_bin[i] + gamma.stc_bin[6] * cIPD_6[studyIPD[i],arm[i]]* stc_bin[i] + gamma.stc_bin[7] * cIPD_7[studyIPD[i],arm[i]]* stc_bin[i] + gamma.stc_bin[8] * cIPD_8[studyIPD[i],arm[i]]* stc_bin[i] + gamma.stc_bin[9] * cIPD_9[studyIPD[i],arm[i]]* stc_bin[i] + gamma.edu_bin[2] * cIPD_2[studyIPD[i],arm[i]]* edu_bin[i] + gamma.edu_bin[3] * cIPD_3[studyIPD[i],arm[i]]* edu_bin[i] + gamma.edu_bin[4] * cIPD_4[studyIPD[i],arm[i]]* edu_bin[i] + gamma.edu_bin[5] * cIPD_5[studyIPD[i],arm[i]]* edu_bin[i] + gamma.edu_bin[6] * cIPD_6[studyIPD[i],arm[i]]* edu_bin[i] + gamma.edu_bin[7] * cIPD_7[studyIPD[i],arm[i]]* edu_bin[i] + gamma.edu_bin[8] * cIPD_8[studyIPD[i],arm[i]]* edu_bin[i] + gamma.edu_bin[9] * cIPD_9[studyIPD[i],arm[i]]* edu_bin[i] 
+                  ) - (
+                    gamma.base[2] * cIPD_2[studyIPD[i],1]* baseline[i] + gamma.base[3] * cIPD_3[studyIPD[i],1]* baseline[i] + gamma.base[4] * cIPD_4[studyIPD[i],1]* baseline[i] + gamma.base[5] * cIPD_5[studyIPD[i],1]* baseline[i] + gamma.base[6] * cIPD_6[studyIPD[i],1]* baseline[i] + gamma.base[7] * cIPD_7[studyIPD[i],1]* baseline[i] + gamma.base[8] * cIPD_8[studyIPD[i],1]* baseline[i] + gamma.base[9] * cIPD_9[studyIPD[i],1]* baseline[i] + gamma.age[2] * cIPD_2[studyIPD[i],1]* age[i] + gamma.age[3] * cIPD_3[studyIPD[i],1]* age[i] + gamma.age[4] * cIPD_4[studyIPD[i],1]* age[i] + gamma.age[5] * cIPD_5[studyIPD[i],1]* age[i] + gamma.age[6] * cIPD_6[studyIPD[i],1]* age[i] + gamma.age[7] * cIPD_7[studyIPD[i],1]* age[i] + gamma.age[8] * cIPD_8[studyIPD[i],1]* age[i] + gamma.age[9] * cIPD_9[studyIPD[i],1]* age[i] + gamma.gender[2] * cIPD_2[studyIPD[i],1]* gender[i] + gamma.gender[3] * cIPD_3[studyIPD[i],1]* gender[i] + gamma.gender[4] * cIPD_4[studyIPD[i],1]* gender[i] + gamma.gender[5] * cIPD_5[studyIPD[i],1]* gender[i] + gamma.gender[6] * cIPD_6[studyIPD[i],1]* gender[i] + gamma.gender[7] * cIPD_7[studyIPD[i],1]* gender[i] + gamma.gender[8] * cIPD_8[studyIPD[i],1]* gender[i] + gamma.gender[9] * cIPD_9[studyIPD[i],1]* gender[i] +  gamma.empl_bin[2] * cIPD_2[studyIPD[i],1]* empl_bin[i] + gamma.empl_bin[3] * cIPD_3[studyIPD[i],1]* empl_bin[i] + gamma.empl_bin[4] * cIPD_4[studyIPD[i],1]* empl_bin[i] + gamma.empl_bin[5] * cIPD_5[studyIPD[i],1]* empl_bin[i] + gamma.empl_bin[6] * cIPD_6[studyIPD[i],1]* empl_bin[i] + gamma.empl_bin[7] * cIPD_7[studyIPD[i],1]* empl_bin[i] + gamma.empl_bin[8] * cIPD_8[studyIPD[i],1]* empl_bin[i] + gamma.empl_bin[9] * cIPD_9[studyIPD[i],1]* empl_bin[i] + gamma.stc_bin[2] * cIPD_2[studyIPD[i],1]* stc_bin[i] + gamma.stc_bin[3] * cIPD_3[studyIPD[i],1]* stc_bin[i] + gamma.stc_bin[4] * cIPD_4[studyIPD[i],1]* stc_bin[i] + gamma.stc_bin[5] * cIPD_5[studyIPD[i],1]* stc_bin[i] + gamma.stc_bin[6] * cIPD_6[studyIPD[i],1]* stc_bin[i] + gamma.stc_bin[7] * cIPD_7[studyIPD[i],1]* stc_bin[i] + gamma.stc_bin[8] * cIPD_8[studyIPD[i],1]* stc_bin[i] + gamma.stc_bin[9] * cIPD_9[studyIPD[i],1]* stc_bin[i] + gamma.edu_bin[2] * cIPD_2[studyIPD[i],1]* edu_bin[i] + gamma.edu_bin[3] * cIPD_3[studyIPD[i],1]* edu_bin[i] + gamma.edu_bin[4] * cIPD_4[studyIPD[i],1]* edu_bin[i] + gamma.edu_bin[5] * cIPD_5[studyIPD[i],1]* edu_bin[i] + gamma.edu_bin[6] * cIPD_6[studyIPD[i],1]* edu_bin[i] + gamma.edu_bin[7] * cIPD_7[studyIPD[i],1]* edu_bin[i] + gamma.edu_bin[8] * cIPD_8[studyIPD[i],1]* edu_bin[i] + gamma.edu_bin[9] * cIPD_9[studyIPD[i],1]* edu_bin[i] )
+  }
+
+  for (s in 1:Ns.IPD) {
+    delta1[s, 1] <- 0 
+    delta1[s, 2] ~ dnorm(md1IPD[s, 2], prect)
+    md1IPD[s, 2] <- (d[2] * cIPD_2[s,2] + d[3] * cIPD_3[s,2] + d[4] * cIPD_4[s,2] + d[5] * cIPD_5[s,2] + d[6] * cIPD_6[s,2] + d[7] * cIPD_7[s,2] + d[8] * cIPD_8[s,2] + d[9] * cIPD_9[s,2]) -
+                    (d[2] * cIPD_2[s,1] + d[3] * cIPD_3[s,1] + d[4] * cIPD_4[s,1] + d[5] * cIPD_5[s,1] + d[6] * cIPD_6[s,1] + d[7] * cIPD_7[s,1] + d[8] * cIPD_8[s,1] + d[9] * cIPD_9[s,1])
+  }
+
+
+  for (idx in 1:(Ns.IPD)) {
+    u[idx] ~ dnorm(0, prec.u)
+  }
+  tau.u ~ dnorm(0, 0.01)I(0,) 
+  prec.u <- 1 / pow(tau.u, 2) 
+  tau ~ dnorm(0, 0.01)I(0,)
+  tau.sq <- pow(tau, 2)
+  prect <- 1 / tau.sq
+
+    tau.cluster.common ~ dnorm(0, 0.01)I(0,)
+  prec.cluster.common <- 1 / pow(tau.cluster.common, 2)
+
+
+ for (j in 1:Nclusters) {
+    cluster.effect[j] ~ dnorm(0, prec.cluster.common)
+  } 
+
+  d[1] <- 0 
+
+  beta.baseline ~ dnorm(0, 10)
+  beta.age ~ dnorm(0, 0.01)
+  beta.gender ~ dnorm(0, 0.01)
+  beta.empl_bin ~ dnorm(0, 0.01)
+  beta.stc_bin ~ dnorm(0, 0.01)
+  beta.edu_bin ~ dnorm(0, 0.01)
+
+  for (k in 2:Nc) { 
+    d[k] ~ dnorm(0, 0.04)
+  }
+
+   lambda_baseline ~ dgamma(50, 9)
+  lambda ~ dgamma(2, 15) 
+# Nel blocco dei prior
+for (k in 2:8) { # Salta il 9
+    gamma.base[k] ~ ddexp(0, lambda_baseline)
+    gamma.age[k] ~ ddexp(0, lambda)
+    gamma.gender[k] ~ ddexp(0, lambda)
+    gamma.empl_bin[k] ~ ddexp(0, lambda)
+    gamma.stc_bin[k] ~ ddexp(0, lambda)
+    gamma.edu_bin[k] ~ ddexp(0, lambda)
+}
+
+# Fissa esplicitamente a zero le interazioni per la componente 9
+gamma.base[9] <- 0
+gamma.age[9] <- 0
+gamma.gender[9] <- 0
+gamma.empl_bin[9] <- 0
+gamma.stc_bin[9] <- 0
+gamma.edu_bin[9] <- 0
+for (i in 1:Npatients) {
+y.ipd.pred[i] ~ dnorm(muIPD[i], prec.pat)
+}
+}
+"
+```
+
+
+```{r thin, include=FALSE}
+library(coda)
+
+# samples_list: lista di imputazioni, ciascuna con un oggetto mcmc.list
+# burn_in: numero di iterazioni da scartare all'inizio
+# thin_step: mantieni 1 iterazione ogni thin_step
+
+apply_burnin_thinning <- function(samples_list, burn_in = 500, thin_step = 5) {
+  
+  lapply(samples_list, function(mcmc_imp) {
+    
+    filtered_chains <- lapply(mcmc_imp, function(chain) {
+      
+      chain_mat <- as.matrix(chain)
+      
+      # 1) Scarta il burn-in
+      if (burn_in >= nrow(chain_mat)) {
+        stop("Burn-in maggiore o uguale al numero di iterazioni disponibili!")
+      }
+      chain_post_burn <- chain_mat[(burn_in + 1):nrow(chain_mat), , drop = FALSE]
+      
+      # 2) Applica il thinning
+      chain_thinned <- chain_post_burn[seq(1, nrow(chain_post_burn), by = thin_step), , drop = FALSE]
+      
+      # 3) Ritorna come oggetto mcmc
+      as.mcmc(chain_thinned)
+    })
+    
+    as.mcmc.list(filtered_chains)
+  })
+}
+
+# Esempio di utilizzo:
+# samples_thinned <- apply_burnin_thinning(samples_for_diag, burn_in = 500, thin_step = 5)
+```
+
+```{r model, include=FALSE}
+
+samps_lambda_pct <- list()
+N.imputed <- 5
+Ns<-4
+
+for (i in 1:N.imputed) {
+  print(paste("Dataset", i))
+  model1.spec <- textConnection(model1_common_pct)
+    y.ipd_i <- as.vector(dataIPD$endpoint)
+    studyIPD_i <- as.vector(studyIPD)
+    arm_i <- as.vector(dataIPD$arm)
+  baseline_i <- as.vector(dataIPD$baseline)
+    age_i <- as.vector(dataIPD$age) 
+    gender_i <- as.vector(dataIPD$gender) 
+    empl_bin_i <- as.vector(dataIPD$empl_bin) 
+    edu_bin_i <- as.vector(dataIPD$edu_bin) 
+    stc_bin_i <- as.vector(dataIPD$stc_bin)
+    cIPD_2_i <- as.matrix(get("cIPD_2"))
+    cIPD_3_i <- as.matrix(get("cIPD_3"))
+    cIPD_4_i <- as.matrix(get("cIPD_4"))
+    cIPD_5_i <- as.matrix(get("cIPD_5"))
+    cIPD_6_i <- as.matrix(get("cIPD_6"))
+    cIPD_7_i <- as.matrix(get("cIPD_7"))
+    cIPD_8_i <- as.matrix(get("cIPD_8"))
+    cIPD_9_i <- as.matrix(get("cIPD_9"))
+    cluster_indicator_jags <- ifelse(N_clusters_per_study_IPD_jags > 1, 1, 0)
+    
+  data_jags <- list(
+    y.ipd = as.vector(dataIPD$endpoint),
+  studyIPD = studyIPD_i,
+    arm = as.vector(dataIPD$arm),
+    clusterID = clusterID_jags, 
+  Nclusters = Nclusters_global,
+  cluster_indicator = cluster_indicator_jags,
+
+  cIPD_2 = as.matrix(get("cIPD_2")),
+  cIPD_3 = as.matrix(get("cIPD_3")),
+  cIPD_4 = as.matrix(get("cIPD_4")),
+  cIPD_5 = as.matrix(get("cIPD_5")),
+  cIPD_6 = as.matrix(get("cIPD_6")),
+  cIPD_7 = as.matrix(get("cIPD_7")),
+  cIPD_8 = as.matrix(get("cIPD_8")),
+  cIPD_9 = as.matrix(get("cIPD_9")),
+    Npatients = Npatients,
+    Ns.IPD = Ns.IPD,
+  baseline = baseline_i,
+        age = age_i,
+        gender = gender_i,
+        empl_bin = empl_bin_i,
+        edu_bin = edu_bin_i,
+        stc_bin = stc_bin_i,
+    Nc = Nc
+  )
+
+  jags.m <- jags.model(textConnection(model1_common_pct), data = data_jags, n.chains = 2, n.adapt = 100)
+  params <- c("tau", "tau.cluster.common", "d",  "beta.baseline", "gamma.base", "beta.age", "gamma.age",
+                "beta.gender", "gamma.gender", "beta.empl_bin", "gamma.empl_bin",
+                "beta.stc_bin", "gamma.stc_bin", "beta.edu_bin", "gamma.edu_bin")
+  closeAllConnections()
+  samps_lambda_pct_temp <- coda.samples(jags.m, params, n.burnin=500, n.thin = 5, n.iter = 3000)
+
+  samps_lambda_pct [[i]] <- samps_lambda_pct_temp
+
+  saveRDS(samps_lambda_pct_temp, file = paste("samps_lambda_no_AD_no_IF_interaz_home", i, ".rds", sep = ""))
+}
+
+```
+
+```{r IC_scaled, echo=FALSE}
+
+library(coda)
+
+setwd("C:\\Users\\tdsfrc40\\OneDrive - Università degli Studi di Verona\\Z\\Federico_main\\Lavori_Vr\\ongoing\\lavori_gruppo_CB\\NMA\\IPD_NMA_RESHIFT\\an_new_dataset_Jan_26\\results_04_02_26")
+
+N.imputed <- 5
+samps_lambda_no_AD_no_IF_interaz <- list()
+
+
+for (i in 1:N.imputed) {
+    file_name <- paste("samps_lambda_no_AD_no_IF_interaz_home", i, ".rds", sep = "")
+    if (file.exists(file_name)) {
+        samps_lambda_no_AD_no_IF_interaz[[i]] <- readRDS(file_name)
+        print(paste("File caricato:", file_name))
+    } else {
+        print(paste("File non trovato:", file_name))
+    }
+}
+
+if (length(samps_lambda_no_AD_no_IF_interaz) == 0) {
+    stop("Nessun file di campioni caricato. Controlla i nomi dei file.")
+}
+
+identical(samps_lambda_no_AD_no_IF_interaz[[1]], samps_lambda_no_AD_no_IF_interaz[[2]])
+identical(samps_lambda_no_AD_no_IF_interaz[[1]], samps_lambda_no_AD_no_IF_interaz[[3]])
+identical(samps_lambda_no_AD_no_IF_interaz[[1]], samps_lambda_no_AD_no_IF_interaz[[4]])
+identical(samps_lambda_no_AD_no_IF_interaz[[1]], samps_lambda_no_AD_no_IF_interaz[[5]])
+identical(samps_lambda_no_AD_no_IF_interaz[[2]], samps_lambda_no_AD_no_IF_interaz[[3]])
+identical(samps_lambda_no_AD_no_IF_interaz[[2]], samps_lambda_no_AD_no_IF_interaz[[4]])
+identical(samps_lambda_no_AD_no_IF_interaz[[2]], samps_lambda_no_AD_no_IF_interaz[[5]])
+identical(samps_lambda_no_AD_no_IF_interaz[[3]], samps_lambda_no_AD_no_IF_interaz[[4]])
+identical(samps_lambda_no_AD_no_IF_interaz[[3]], samps_lambda_no_AD_no_IF_interaz[[5]])
+identical(samps_lambda_no_AD_no_IF_interaz[[4]], samps_lambda_no_AD_no_IF_interaz[[5]])
+
+all_chains_no_AD_lambda <- do.call(rbind, lapply(samps_lambda_no_AD_no_IF_interaz, function(imputation_result) {
+    if (inherits(imputation_result, "mcmc.list")) {
+        do.call(rbind, imputation_result)
+    } else if (inherits(imputation_result, "mcmc")) {
+        as.matrix(imputation_result)
+    } else {
+        stop("Formato inatteso per i risultati caricati.")
+    }
+}))
+
+risultati_comb_no_AD <- list()
+
+for (parametro in colnames(all_chains_no_AD_lambda)) {
+    campioni <- all_chains_no_AD_lambda[, parametro]
+    
+    media <- mean(campioni)
+    mediana <- median(campioni)
+    percentile_2.5 <- quantile(campioni, 0.025)
+    percentile_97.5 <- quantile(campioni, 0.975)
+
+    risultati_comb_no_AD[[parametro]] <- data.frame(
+        median = mediana,
+        mean = media,
+        percentile_2.5 = percentile_2.5,
+        percentile_97.5 = percentile_97.5,
+        stringsAsFactors = FALSE
+    )
+}
+
+risultati_comb_no_AD_df <- do.call(rbind, risultati_comb_no_AD)
+
+risultati_comb_no_AD_df$median <- round(risultati_comb_no_AD_df$median, 
+                                        ifelse(grepl("^u\\[", rownames(risultati_comb_no_AD_df)), 2, 4))
+risultati_comb_no_AD_df$mean <- round(risultati_comb_no_AD_df$mean, 
+                                      ifelse(grepl("^u\\[", rownames(risultati_comb_no_AD_df)), 2, 4))
+risultati_comb_no_AD_df$percentile_2.5 <- round(risultati_comb_no_AD_df$percentile_2.5, 4)
+risultati_comb_no_AD_df$percentile_97.5 <- round(risultati_comb_no_AD_df$percentile_97.5, 4)
+
+print(risultati_comb_no_AD_df)
+```
+
+```{r FP, echo=FALSE}
+library(tidyverse)
+library(metafor)
+library(bayesplot)
+library(dplyr)
+library(ggplot2)
+library(HDInterval)
+# 1. Filtra solo i parametri 'd' (componenti principali) dal dataframe dei risultati
+component_results <- risultati_comb_no_AD_df %>%
+  tibble::rownames_to_column("parameter") %>%
+  filter(grepl("^d\\[", parameter)) %>%
+  # Escludi d[1] se presente
+  filter(parameter != "d[1]")
+
+# 2. Aggiungi i nomi delle componenti (assicurati che l'ordine corrisponda)
+component_results$component <- components[-1] # Escludi la prima componente
+
+# 3. Ordina per stima puntuale (opzionale)
+component_results <- component_results %>%
+  arrange(median)
+
+# 4. Crea il forest plot
+forest_plot_from_results <- ggplot(component_results, 
+       aes(y = factor(component, levels = rev(component)), 
+           x = median, 
+           xmin = percentile_2.5, 
+           xmax = percentile_97.5)) +
+  geom_point(size = 3) +
+  geom_errorbar(width = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+scale_x_continuous(breaks = seq(-12, 12, by = 4),  # Sequence from -12 to +12 by 2
+                     limits = c(-20, +20)) +          # Set axis limits
+  xlab("Effect Estimate (outcome on the 0-100 scale)") +
+  ylab("Component") +
+  ggtitle("Forest Plot of Component Effects") +
+  theme_bw()
+
+print(forest_plot_from_results)
+```
+
+```{r descaling, echo=FALSE}
+# 1. Calcolo SD (Età fissa, altre da merged_imp)
+sd_age    <- sd(as.numeric(merged_imp$age), na.rm = TRUE)
+sd_gender <- sd(as.numeric(merged_imp$gender), na.rm = TRUE)
+sd_empl   <- sd(as.numeric(merged_imp$empl_bin), na.rm = TRUE)
+sd_stc    <- sd(as.numeric(merged_imp$stc_bin), na.rm = TRUE)
+sd_edu    <- sd(as.numeric(merged_imp$edu_bin), na.rm = TRUE)
+
+sd_map <- c(
+  "beta.age"      = sd_age,
+  "beta.gender"   = sd_gender,
+  "beta.empl_bin" = sd_empl,
+  "beta.stc_bin"  = sd_stc,
+  "beta.edu_bin"  = sd_edu,
+  "beta.baseline" = 1
+)
+
+# 2. Ciclo di calcolo con formattazione forzata a 4 decimali
+risultati_descaled_list <- list()
+beta_params <- c("beta.baseline", "beta.age", "beta.gender", "beta.empl_bin", "beta.stc_bin", "beta.edu_bin")
+
+for (parametro in beta_params) {
+    # Campioni originali
+    campioni_no_AD <- all_chains_no_AD_lambda[, parametro]
+    
+    # De-scaling
+    campioni_unno_AD <- campioni_no_AD / sd_map[parametro]
+    
+    # Calcolo statistiche
+    stats <- c(
+      median = median(campioni_unno_AD),
+      mean   = mean(campioni_unno_AD),
+      p2.5   = quantile(campioni_unno_AD, 0.025),
+      p97.5  = quantile(campioni_unno_AD, 0.975)
+    )
+    
+    # Formattazione forzata a stringa con 4 decimali (così vedi 0.1200 e non 0.12)
+    risultati_descaled_list[[parametro]] <- data.frame(
+        median          = sprintf("%.3f", stats["median"]),
+        mean            = sprintf("%.3f", stats["mean"]),
+        percentile_2.5  = sprintf("%.3f", stats["p2.5.2.5%"]),
+        percentile_97.5 = sprintf("%.3f", stats["p97.5.97.5%"]),
+        stringsAsFactors = FALSE
+    )
+}
+
+# 3. Risultato finale
+risultati_descaled_df <- do.call(rbind, risultati_descaled_list)
+rownames(risultati_descaled_df) <- c(
+  "beta.baseline", "beta.age", "beta.gender", 
+  "beta.empl_bin", "beta.stc_bin", "beta.edu_bin"
+)
+
+print(risultati_descaled_df)
+```
+
+```{r unscaled, include=FALSE}
+# 1. Calcolo delle SD (usando il merged_imp aggiornato con i tuoi 'cap' a 16 e 100)
+sd_baseline_orig <- sd(merged_imp$baseline, na.rm = TRUE)
+sd_PE_orig  <- sd(merged_imp$PE, na.rm = TRUE)
+sd_CR_orig  <- sd(merged_imp$CR, na.rm = TRUE)
+sd_ACC_orig <- sd(merged_imp$ACC, na.rm = TRUE)
+sd_REL_orig <- sd(merged_imp$REL, na.rm = TRUE)
+sd_PM_orig  <- sd(merged_imp$PM, na.rm = TRUE)
+sd_BA_orig  <- sd(merged_imp$BA, na.rm = TRUE)
+sd_SSS_orig <- sd(merged_imp$SSS, na.rm = TRUE)
+sd_IF_orig  <- sd(merged_imp$IF, na.rm = TRUE)
+
+# 2. Estrazione campioni
+# Nota: Assicurati che i nomi corrispondano a quelli in all_chains_no_AD_lambda
+list_samples <- list(
+  "Baseline Score" = all_chains_no_AD_lambda[, "beta.baseline"],
+  "PE"  = all_chains_no_AD_lambda[, "d[2]"],
+  "CR"  = all_chains_no_AD_lambda[, "d[3]"],
+  "ACC" = all_chains_no_AD_lambda[, "d[4]"],
+  "REL" = all_chains_no_AD_lambda[, "d[5]"],
+  "PM"  = all_chains_no_AD_lambda[, "d[6]"],
+  "BA"  = all_chains_no_AD_lambda[, "d[7]"],
+  "SSS" = all_chains_no_AD_lambda[, "d[8]"],
+  "IF"  = all_chains_no_AD_lambda[, "d[9]"]
+)
+
+list_sds <- list(
+  sd_baseline_orig, sd_PE_orig, sd_CR_orig, sd_ACC_orig, 
+  sd_REL_orig, sd_PM_orig, sd_BA_orig, sd_SSS_orig, sd_IF_orig
+)
+
+# 3. Creazione del data frame (QUESTO RISOLVE L'ERRORE)
+results_df_scaled <- data.frame(
+  Predictor = names(list_samples),
+  Interpretation = "Change in outcome for a 1-SD increase",
+  stringsAsFactors = FALSE
+)
+
+# 4. Funzione di riepilogo a 4 decimali
+summarize_mcmc_fixed <- function(samples) {
+  mean_val <- mean(samples)
+  ci <- quantile(samples, probs = c(0.025, 0.975))
+  sprintf("%.3f (%.3f, %.3f)", mean_val, ci[1], ci[2])
+}
+
+# 5. Calcolo e Scaling contemporaneo
+results_column <- c()
+for (i in 1:length(list_samples)) {
+  # Scaling: Moltiplichiamo i campioni originali per la loro SD
+  scaled_samples <- list_samples[[i]] * list_sds[[i]]
+  results_column[i] <- summarize_mcmc_fixed(scaled_samples)
+}
+
+# Aggiunta della colonna al data frame
+results_df_scaled$`Mean (95% Credibility Interval)` <- results_column
+
+# 6. Stampa
+print(knitr::kable(results_df_scaled, align = c('l', 'l', 'c'), 
+                   caption = "Standardized Component Effects (Z-scores)"))
+```
+
+```{r interaz, include=FALSE}
+library(dplyr)
+library(knitr)
+
+# Mappa delle covariate e delle SD (assicurati che sd_age, sd_gender_orig, ecc. siano definiti)
+covariate_map <- list(
+  baseline   = "base",       
+  age        = "age",
+  gender     = "gender",
+  empl_bin   = "empl_bin",
+  stc_bin    = "stc_bin",
+  edu_bin    = "edu_bin"
+)
+
+sd_list <- list(
+  baseline = NA, 
+  age      = sd_age,
+  gender   = sd_gender,
+  empl_bin = sd_empl,
+  stc_bin  = sd_stc,
+  edu_bin  = sd_edu
+)
+
+# Funzione per estrarre le colonne gamma
+extract_gamma_samples <- function(mat, var_pattern) {
+  gamma_cols <- grep(paste0("^gamma\\.", var_pattern, "(\\[|$)"), colnames(mat), value = TRUE)
+  if (length(gamma_cols) == 0) return(NULL)
+  return(mat[, gamma_cols, drop = FALSE])
+}
+
+results_gamma_cont_df <- data.frame(
+  Interaction = character(),
+  Component = character(),
+  `Coefficient (95% Credibility Interval)` = character(),
+  stringsAsFactors = FALSE
+)
+
+for (cov_real in names(covariate_map)) {
+  cov_model <- covariate_map[[cov_real]]
+  gamma_mat <- extract_gamma_samples(all_chains_no_AD_lambda, cov_model)
+  if (is.null(gamma_mat)) next
+  
+  for (colname in colnames(gamma_mat)) {
+    gamma_samples <- as.numeric(gamma_mat[, colname])
+    
+    # De-scaling
+    if (is.na(sd_list[[cov_real]])) {
+      gamma_descaled <- gamma_samples   
+    } else {
+      gamma_descaled <- gamma_samples / sd_list[[cov_real]]
+    }
+    
+    # Calcolo statistiche
+    mean_val <- mean(gamma_descaled, na.rm = TRUE)
+    ci <- quantile(gamma_descaled, probs = c(0.025, 0.975), na.rm = TRUE)
+    
+    # Estrazione nome componente (es. d[2] -> 2)
+    component_name <- sub(".*\\[(.*)\\]", "\\1", colname)
+    if (component_name == colname) component_name <- "(global)"
+    
+    # FORMATTAZIONE A 4 DECIMALIE (sprintf forza la visualizzazione degli zeri)
+    results_gamma_cont_df[nrow(results_gamma_cont_df) + 1, ] <- c(
+      paste(cov_real, "× component", sep = " "),
+      component_name,
+      sprintf("%.3f (%.3f, %.3f)", mean_val, ci[1], ci[2])
+    )
+  }
+}
+
+# Ordinamento
+results_gamma_cont_df <- results_gamma_cont_df %>% arrange(Interaction, Component)
+
+# Stampa Tabella
+cat("Tabella dei coefficienti di interazione de-scalati (OUTCOME CONTINUO):\n")
+print(knitr::kable(
+  results_gamma_cont_df,
+  caption = "Interazioni Covariata × Componente (de-scalate a 4 decimali)",
+  align = c('l', 'l', 'c')
+))
+```
+
+```{r maxitab, echo=FALSE}
+library(dplyr)
+library(knitr)
+# --- 2. COSTRUZIONE TABELLA 2 (STANDARDIZED - Z-SCORES) ---
+
+# Creiamo la lista campioni usando esattamente i tuoi puntatori
+list_samples_no_AD <- list(
+  "Baseline Score" = all_chains_no_AD_lambda[, "beta.baseline"] * sd_baseline_orig,
+  "PE"  = all_chains_no_AD_lambda[, "d[2]"] * sd_PE_orig,
+  "CR"  = all_chains_no_AD_lambda[, "d[3]"] * sd_CR_orig,
+  "ACC" = all_chains_no_AD_lambda[, "d[4]"] * sd_ACC_orig,
+  "REL" = all_chains_no_AD_lambda[, "d[5]"] * sd_REL_orig,
+  "PM"  = all_chains_no_AD_lambda[, "d[6]"] * sd_PM_orig,
+  "BA"  = all_chains_no_AD_lambda[, "d[7]"] * sd_BA_orig,
+  "SSS" = all_chains_no_AD_lambda[, "d[8]"] * sd_SSS_orig,
+  "IF"  = all_chains_no_AD_lambda[, "d[9]"] * sd_IF_orig
+)
+
+# Aggiungiamo le covariate già standardizzate (age, gender, etc.)
+altre_covs <- c("beta.age", "beta.gender", "beta.empl_bin", "beta.stc_bin", "beta.edu_bin")
+for(cov in altre_covs) {
+  if(cov %in% colnames(all_chains_no_AD_lambda)) {
+    list_samples_no_AD[[cov]] <- all_chains_no_AD_lambda[, cov]
+  }
+}
+
+# Aggiungiamo le interazioni gamma (già Z-score)
+gamma_cols <- grep("^gamma\\.", colnames(all_chains_no_AD_lambda), value = TRUE)
+for(g in gamma_cols) {
+  list_samples_no_AD[[g]] <- all_chains_no_AD_lambda[, g]
+}
+
+# Funzione riepilogo a 4 decimali (Mediana, Media, CI)
+summarize_mcmc_v2 <- function(samples) {
+  med <- median(samples, na.rm = TRUE)
+  mn  <- mean(samples, na.rm = TRUE)
+  ci  <- quantile(samples, probs = c(0.025, 0.975), na.rm = TRUE)
+  sprintf("%.3f (%.3f) [%.3f, %.3f]", med, mn, ci[1], ci[2])
+}
+
+# Creazione DataFrame Tabella 2
+tabella_2_no_AD <- data.frame(
+  Parameter = names(list_samples_no_AD),
+  `Estimate (no_AD) [95% CrI]` = sapply(list_samples_no_AD, summarize_mcmc_v2),
+  check.names = FALSE, stringsAsFactors = FALSE
+)
+
+# --- 3. COSTRUZIONE TABELLA 1 (UNSTANDARDIZED - CLINICA) ---
+
+# Qui usiamo la logica inversa (de-scaling)
+list_samples_unno_AD <- list(
+  "Baseline Score" = all_chains_no_AD_lambda[, "beta.baseline"], # Già scala originale
+  "PE"  = all_chains_no_AD_lambda[, "d[2]"],
+  "CR"  = all_chains_no_AD_lambda[, "d[3]"],
+  "ACC" = all_chains_no_AD_lambda[, "d[4]"],
+  "REL" = all_chains_no_AD_lambda[, "d[5]"],
+  "PM"  = all_chains_no_AD_lambda[, "d[6]"],
+  "BA"  = all_chains_no_AD_lambda[, "d[7]"],
+  "SSS" = all_chains_no_AD_lambda[, "d[8]"],
+  "IF"  = all_chains_no_AD_lambda[, "d[9]"]
+)
+
+# Mappa SD per de-scaling covariate e interazioni
+sd_map <- c("beta.age"=sd_age, "beta.gender"=sd_gender, "beta.empl_bin"=sd_empl, 
+            "beta.stc_bin"=sd_stc, "beta.edu_bin"=sd_edu)
+
+for(cov in names(sd_map)) {
+  if(cov %in% colnames(all_chains_no_AD_lambda)) {
+    list_samples_unno_AD[[cov]] <- all_chains_no_AD_lambda[, cov] / sd_map[cov]
+  }
+}
+
+# De-scaling interazioni gamma
+for(g in gamma_cols) {
+  # Trova quale SD usare in base al nome (es. gamma.age -> sd_age)
+  for(s_name in names(sd_map)) {
+    if(grepl(gsub("beta\\.", "", s_name), g)) {
+       list_samples_unno_AD[[g]] <- all_chains_no_AD_lambda[, g] / sd_map[s_name]
+    }
+  }
+  # Se è gamma.base, rimane tale e quale
+  if(grepl("base", g)) list_samples_unno_AD[[g]] <- all_chains_no_AD_lambda[, g]
+}
+
+# Creazione DataFrame Tabella 1
+tabella_1_unno_AD <- data.frame(
+  Parameter = names(list_samples_unno_AD),
+  `Estimate (unno_AD) [95% CrI]` = sapply(list_samples_unno_AD, summarize_mcmc_v2),
+  check.names = FALSE, stringsAsFactors = FALSE
+)
+
+# --- 4. STAMPA ---
+cat("\n### TABELLA 1: COEFFICIENTI UNSTANDARDIZED (Scala Clinica)\n")
+print(knitr::kable(tabella_1_unno_AD, align = "lc"))
+
+cat("\n### TABELLA 2: COEFFICIENTI STANDARDIZED (Z-Scores / Importanza)\n")
+print(knitr::kable(tabella_2_no_AD, align = "lc"))
+
+```
+
